@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package chat;
+
+// =========================================================================== #
+// Chat 
+// =========================================================================== #
+message ChatMessage {
+  string role    = 1;
+  string content = 2;
+}
+
+message ChatResponse {
+  string role    = 1;
+  string content = 2;
+}
+
+// =========================================================================== #
+// Shared model types
+// =========================================================================== #
+message Note {
+  int64  id         = 1;
+  string title      = 2;
+  string content    = 3;
+  string created_at = 4;
+}
+
+message Task {
+  int64  id         = 1;
+  string title      = 2;
+  string due_date   = 3;
+  bool   completed  = 4;
+  string created_at = 5;
+}
+
+// =========================================================================== #
+// Notes request/response
+// =========================================================================== #
+message SaveNoteRequest {
+  string title   = 1;
+  string content = 2;
+}
+
+message SaveNoteResponse {
+  Note note = 1;
+}
+
+message SearchNotesRequest {
+  string keyword = 1;
+}
+
+message SearchNotesResponse {
+  repeated Note notes = 1;
+}
+
+// =========================================================================== #
+// Tasks request/response
+// =========================================================================== #
+message CreateTaskRequest {
+  string title    = 1;
+  string due_date = 2;  // "" when unset
+}
+
+message CreateTaskResponse {
+  Task task = 1;
+}
+
+message ListTasksRequest {}
+
+message ListTasksResponse {
+  repeated Task tasks = 1;
+}
+
+message CompleteTaskRequest {
+  int64 task_id = 1;
+}
+
+message CompleteTaskResponse {
+  bool success = 1;
+}
+
+// =========================================================================== #
+// Service
+// =========================================================================== #
+service ChatService {
+  rpc SendMessage(ChatMessage) returns (ChatResponse);
+
+  rpc SaveNote(SaveNoteRequest)         returns (SaveNoteResponse);
+  rpc SearchNotes(SearchNotesRequest)   returns (SearchNotesResponse);
+  rpc CreateTask(CreateTaskRequest)     returns (CreateTaskResponse);
+  rpc ListTasks(ListTasksRequest)       returns (ListTasksResponse);
+  rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
+}

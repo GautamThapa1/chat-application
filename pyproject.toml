@@ -1,0 +1,12 @@
+[project]
+name = "chat-app"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.163.2",
+    "grpcio>=1.85.3",
+    "grpcio-tools>=1.85.3",
+    "uvicorn[standard]>=0.54.0",
+]

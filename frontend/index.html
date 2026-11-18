@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f5f7f8" />
+    <title>Chat · Luma</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #172326;
+        background: #f5f7f8;
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+        --muted: #718084;
+        --line: #e6ebec;
+        --accent: #167d73;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        padding: 28px 16px;
+      }
+
+      .chat {
+        width: min(100%, 680px);
+        height: min(760px, calc(100vh - 56px));
+        min-height: 420px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: #fff;
+        box-shadow: 0 20px 60px rgb(25 48 51 / 8%);
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 24px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .brand-mark {
+        width: 38px;
+        height: 38px;
+        display: grid;
+        place-items: center;
+        border-radius: 12px;
+        background: #e6f4f1;
+        color: var(--accent);
+        font-size: 19px;
+        font-weight: 700;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 16px;
+        letter-spacing: -0.02em;
+      }
+
+      .subtitle {
+        margin: 3px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .connection {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .connection::before {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #c3ccce;
+        content: "";
+      }
+
+      .connection.connected::before { background: #2eaa79; }
+      .connection.error::before { background: #d97764; }
+
+      #log {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 24px;
+        scroll-behavior: smooth;
+      }
+
+      .empty-state {
+        margin: auto;
+        color: #98a4a6;
+        font-size: 14px;
+        text-align: center;
+      }
+
+      .msg {
+        max-width: min(80%, 460px);
+        padding: 11px 14px;
+        border-radius: 16px;
+        background: #f1f4f4;
+        color: #263638;
+        font-size: 14px;
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+
+      .msg.user {
+        align-self: flex-end;
+        border-bottom-right-radius: 5px;
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .msg.assistant {
+        align-self: flex-start;
+        border-bottom-left-radius: 5px;
+      }
+
+      .msg.system {
+        align-self: center;
+        padding: 4px 10px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+        text-align: center;
+      }
+
+      .composer {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 16px 20px;
+        border-top: 1px solid var(--line);
+      }
+
+      #input {
+        min-width: 0;
+        flex: 1;
+        padding: 12px 15px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        outline: none;
+        background: #f9fbfb;
+        color: inherit;
+        font: inherit;
+        font-size: 14px;
+        transition: border-color 150ms, box-shadow 150ms;
+      }
+
+      #input::placeholder { color: #9aa6a8; }
+      #input:focus {
+        border-color: #80bcb5;
+        box-shadow: 0 0 0 3px rgb(22 125 115 / 10%);
+      }
+
+      button {
+        padding: 12px 18px;
+        border: 0;
+        border-radius: 12px;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 150ms, transform 150ms;
+      }
+
+      button:hover { background: #116b62; }
+      button:active { transform: scale(0.98); }
+      button:focus-visible { outline: 3px solid #9ed5ce; outline-offset: 2px; }
+
+      @media (max-width: 520px) {
+        body { padding: 0; }
+        .chat {
+          width: 100%;
+          height: 100vh;
+          min-height: 0;
+          border: 0;
+          border-radius: 0;
+        }
+        .topbar { padding: 16px 18px; }
+        #log { padding: 20px 16px; }
+        .composer { padding: 12px; }
+        button { padding-inline: 15px; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="chat">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">✳</div>
+          <div>
+            <h1>Luma Chat</h1>
+            <p class="subtitle">A little space to think out loud</p>
+          </div>
+        </div>
+        <div id="connection" class="connection" role="status">Connecting</div>
+      </header>
+
+      <section id="log" aria-label="Conversation" aria-live="polite">
+        <p id="empty-state" class="empty-state">Send a message to start the conversation.</p>
+      </section>
+
+      <form id="form" class="composer">
+        <input id="input" autocomplete="off" placeholder="Write a message..." aria-label="Message" />
+        <button type="submit">Send</button>
+      </form>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

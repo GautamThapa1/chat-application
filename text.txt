@@ -1,0 +1,8 @@
+20. Test these messages:
+User message	Expected operation
+Remember that my backend uses FastAPI	Save note
+Show my notes	Retrieve notes
+Create a task to finish gRPC	Create task
+Show my tasks	List tasks
+Mark task 1 completed	Complete task
+Hello	General chat
