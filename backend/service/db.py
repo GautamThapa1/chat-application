@@ -55,6 +55,21 @@ def save_message(role: str, content: str) -> int:
     return msg_id
 
 
+def save_conversation(user_content: str, assistant_content: str) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            conn.executemany(
+                "INSERT INTO messages (role, content) VALUES (?, ?)",
+                (
+                    ("user", user_content),
+                    ("assistant", assistant_content),
+                ),
+            )
+    finally:
+        conn.close()
+
+
 def get_messages() -> list[dict]:
     conn = get_connection()
     rows = conn.execute(

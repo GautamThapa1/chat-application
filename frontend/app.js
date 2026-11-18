@@ -8,7 +8,8 @@ const inputEl = document.getElementById("input");
 const connectionEl = document.getElementById("connection");
 const clearButtonEl = document.getElementById("clear");
 
-let streamingBubble = null;
+const pendingBubbles = new Map();
+let nextRequestId = 0;
 
 const ws = new WebSocket(WS_URL);
 
@@ -19,17 +20,19 @@ ws.onopen = () => {
 
 ws.onclose = () => {
   setConnection("Disconnected", "error");
+  removePendingBubbles();
   addLine("system", "disconnected");
 };
 
 ws.onerror = (err) => {
   setConnection("Connection error", "error");
+  removePendingBubbles();
   addLine("system", `error: ${err.message || "websocket error"}`);
 };
 
 clearButtonEl.addEventListener("click", () => {
   logEl.replaceChildren(createEmptyState());
-  streamingBubble = null;
+  pendingBubbles.clear();
 });
 
 ws.onmessage = (event) => {
@@ -42,16 +45,24 @@ ws.onmessage = (event) => {
   }
 
   if (msg.type === "start") {
-    streamingBubble = createMessageBubble("assistant");
-  } else if (msg.type === "chunk") {
-    if (!streamingBubble) {
-      streamingBubble = createMessageBubble("assistant");
+    const bubble = pendingBubbles.get(msg.request_id);
+    if (bubble) {
+      bubble.classList.remove("thinking");
+      bubble.replaceChildren();
     }
-    streamingBubble.textContent += msg.content;
-    logEl.scrollTop = logEl.scrollHeight;
+  } else if (msg.type === "chunk") {
+    const bubble = pendingBubbles.get(msg.request_id);
+    if (bubble) {
+      bubble.classList.remove("thinking");
+      bubble.textContent += msg.content;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
   } else if (msg.type === "complete") {
-    streamingBubble = null;
-  } else if (msg.error) {
+    pendingBubbles.delete(msg.request_id);
+  } else if (msg.type === "error" || msg.error) {
+    const bubble = pendingBubbles.get(msg.request_id);
+    bubble?.remove();
+    pendingBubbles.delete(msg.request_id);
     addLine("system", `error: ${msg.error}`);
   } else {
     addLine(msg.role || "assistant", msg.content);
@@ -68,8 +79,10 @@ formEl.addEventListener("submit", (e) => {
     return;
   }
 
-  ws.send(text);
+  const requestId = String(++nextRequestId);
+  ws.send(JSON.stringify({ type: "message", request_id: requestId, content: text }));
   addLine("user", text);
+  pendingBubbles.set(requestId, createThinkingBubble());
   inputEl.value = "";
 });
 
@@ -89,6 +102,30 @@ function createMessageBubble(role) {
   div.className = `msg ${safeRole}`;
   logEl.appendChild(div);
   return div;
+}
+
+function createThinkingBubble() {
+  const bubble = createMessageBubble("assistant");
+  bubble.classList.add("thinking");
+  bubble.setAttribute("role", "status");
+
+  const spinner = document.createElement("span");
+  spinner.className = "thinking-spinner";
+  spinner.setAttribute("aria-hidden", "true");
+
+  const label = document.createElement("span");
+  label.textContent = "Thinking...";
+
+  bubble.append(spinner, label);
+  logEl.scrollTop = logEl.scrollHeight;
+  return bubble;
+}
+
+function removePendingBubbles() {
+  for (const bubble of pendingBubbles.values()) {
+    bubble.remove();
+  }
+  pendingBubbles.clear();
 }
 
 function createEmptyState() {

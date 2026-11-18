@@ -9,6 +9,10 @@ wheels/
 # Virtual environments
 .venv
 
+# Local credentials
+.env
+.env.*
+!.env.example
 
 # database
 app.db

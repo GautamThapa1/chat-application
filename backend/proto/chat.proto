@@ -15,6 +15,15 @@ message ChatResponse {
   string content = 2;
 }
 
+message SaveConversationRequest {
+  string user_content      = 1;
+  string assistant_content = 2;
+}
+
+message SaveConversationResponse {
+  bool success = 1;
+}
+
 // =========================================================================== #
 // Shared model types
 // =========================================================================== #
@@ -84,6 +93,7 @@ message CompleteTaskResponse {
 // =========================================================================== #
 service ChatService {
   rpc SendMessage(ChatMessage) returns (ChatResponse);
+  rpc SaveConversation(SaveConversationRequest) returns (SaveConversationResponse);
 
   rpc SaveNote(SaveNoteRequest)         returns (SaveNoteResponse);
   rpc SearchNotes(SearchNotesRequest)   returns (SearchNotesResponse);

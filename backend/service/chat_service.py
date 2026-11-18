@@ -16,6 +16,10 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         db.save_message("assistant", reply)
         return chat_pb2.ChatResponse(role="assistant", content=reply)
 
+    def SaveConversation(self, request, context):
+        db.save_conversation(request.user_content, request.assistant_content)
+        return chat_pb2.SaveConversationResponse(success=True)
+
     # ---------------------------------------------------------------- #
     # Notes  (db.save_note / db.search_notes)
     # ---------------------------------------------------------------- #

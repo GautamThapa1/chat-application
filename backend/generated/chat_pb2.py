@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nchat.proto\x12\x04\x63hat\",\n\x0b\x43hatMessage\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\"-\n\x0c\x43hatResponse\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\"F\n\x04Note\x12\n\n\x02id\x18\x01 \x01(\x03\x12\r\n\x05title\x18\x02 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x03 \x01(\t\x12\x12\n\ncreated_at\x18\x04 \x01(\t\"Z\n\x04Task\x12\n\n\x02id\x18\x01 \x01(\x03\x12\r\n\x05title\x18\x02 \x01(\t\x12\x10\n\x08\x64ue_date\x18\x03 \x01(\t\x12\x11\n\tcompleted\x18\x04 \x01(\x08\x12\x12\n\ncreated_at\x18\x05 \x01(\t\"1\n\x0fSaveNoteRequest\x12\r\n\x05title\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\",\n\x10SaveNoteResponse\x12\x18\n\x04note\x18\x01 \x01(\x0b\x32\n.chat.Note\"%\n\x12SearchNotesRequest\x12\x0f\n\x07keyword\x18\x01 \x01(\t\"0\n\x13SearchNotesResponse\x12\x19\n\x05notes\x18\x01 \x03(\x0b\x32\n.chat.Note\"4\n\x11\x43reateTaskRequest\x12\r\n\x05title\x18\x01 \x01(\t\x12\x10\n\x08\x64ue_date\x18\x02 \x01(\t\".\n\x12\x43reateTaskResponse\x12\x18\n\x04task\x18\x01 \x01(\x0b\x32\n.chat.Task\"\x12\n\x10ListTasksRequest\".\n\x11ListTasksResponse\x12\x19\n\x05tasks\x18\x01 \x03(\x0b\x32\n.chat.Task\"&\n\x13\x43ompleteTaskRequest\x12\x0f\n\x07task_id\x18\x01 \x01(\x03\"\'\n\x14\x43ompleteTaskResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x32\x88\x03\n\x0b\x43hatService\x12\x34\n\x0bSendMessage\x12\x11.chat.ChatMessage\x1a\x12.chat.ChatResponse\x12\x39\n\x08SaveNote\x12\x15.chat.SaveNoteRequest\x1a\x16.chat.SaveNoteResponse\x12\x42\n\x0bSearchNotes\x12\x18.chat.SearchNotesRequest\x1a\x19.chat.SearchNotesResponse\x12?\n\nCreateTask\x12\x17.chat.CreateTaskRequest\x1a\x18.chat.CreateTaskResponse\x12<\n\tListTasks\x12\x16.chat.ListTasksRequest\x1a\x17.chat.ListTasksResponse\x12\x45\n\x0c\x43ompleteTask\x12\x19.chat.CompleteTaskRequest\x1a\x1a.chat.CompleteTaskResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nchat.proto\x12\x04\x63hat\",\n\x0b\x43hatMessage\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\"-\n\x0c\x43hatResponse\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\"J\n\x17SaveConversationRequest\x12\x14\n\x0cuser_content\x18\x01 \x01(\t\x12\x19\n\x11\x61ssistant_content\x18\x02 \x01(\t\"+\n\x18SaveConversationResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"F\n\x04Note\x12\n\n\x02id\x18\x01 \x01(\x03\x12\r\n\x05title\x18\x02 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x03 \x01(\t\x12\x12\n\ncreated_at\x18\x04 \x01(\t\"Z\n\x04Task\x12\n\n\x02id\x18\x01 \x01(\x03\x12\r\n\x05title\x18\x02 \x01(\t\x12\x10\n\x08\x64ue_date\x18\x03 \x01(\t\x12\x11\n\tcompleted\x18\x04 \x01(\x08\x12\x12\n\ncreated_at\x18\x05 \x01(\t\"1\n\x0fSaveNoteRequest\x12\r\n\x05title\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\",\n\x10SaveNoteResponse\x12\x18\n\x04note\x18\x01 \x01(\x0b\x32\n.chat.Note\"%\n\x12SearchNotesRequest\x12\x0f\n\x07keyword\x18\x01 \x01(\t\"0\n\x13SearchNotesResponse\x12\x19\n\x05notes\x18\x01 \x03(\x0b\x32\n.chat.Note\"4\n\x11\x43reateTaskRequest\x12\r\n\x05title\x18\x01 \x01(\t\x12\x10\n\x08\x64ue_date\x18\x02 \x01(\t\".\n\x12\x43reateTaskResponse\x12\x18\n\x04task\x18\x01 \x01(\x0b\x32\n.chat.Task\"\x12\n\x10ListTasksRequest\".\n\x11ListTasksResponse\x12\x19\n\x05tasks\x18\x01 \x03(\x0b\x32\n.chat.Task\"&\n\x13\x43ompleteTaskRequest\x12\x0f\n\x07task_id\x18\x01 \x01(\x03\"\'\n\x14\x43ompleteTaskResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x32\xdb\x03\n\x0b\x43hatService\x12\x34\n\x0bSendMessage\x12\x11.chat.ChatMessage\x1a\x12.chat.ChatResponse\x12Q\n\x10SaveConversation\x12\x1d.chat.SaveConversationRequest\x1a\x1e.chat.SaveConversationResponse\x12\x39\n\x08SaveNote\x12\x15.chat.SaveNoteRequest\x1a\x16.chat.SaveNoteResponse\x12\x42\n\x0bSearchNotes\x12\x18.chat.SearchNotesRequest\x1a\x19.chat.SearchNotesResponse\x12?\n\nCreateTask\x12\x17.chat.CreateTaskRequest\x1a\x18.chat.CreateTaskResponse\x12<\n\tListTasks\x12\x16.chat.ListTasksRequest\x1a\x17.chat.ListTasksResponse\x12\x45\n\x0c\x43ompleteTask\x12\x19.chat.CompleteTaskRequest\x1a\x1a.chat.CompleteTaskResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,30 +35,34 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CHATMESSAGE']._serialized_end=64
   _globals['_CHATRESPONSE']._serialized_start=66
   _globals['_CHATRESPONSE']._serialized_end=111
-  _globals['_NOTE']._serialized_start=113
-  _globals['_NOTE']._serialized_end=183
-  _globals['_TASK']._serialized_start=185
-  _globals['_TASK']._serialized_end=275
-  _globals['_SAVENOTEREQUEST']._serialized_start=277
-  _globals['_SAVENOTEREQUEST']._serialized_end=326
-  _globals['_SAVENOTERESPONSE']._serialized_start=328
-  _globals['_SAVENOTERESPONSE']._serialized_end=372
-  _globals['_SEARCHNOTESREQUEST']._serialized_start=374
-  _globals['_SEARCHNOTESREQUEST']._serialized_end=411
-  _globals['_SEARCHNOTESRESPONSE']._serialized_start=413
-  _globals['_SEARCHNOTESRESPONSE']._serialized_end=461
-  _globals['_CREATETASKREQUEST']._serialized_start=463
-  _globals['_CREATETASKREQUEST']._serialized_end=515
-  _globals['_CREATETASKRESPONSE']._serialized_start=517
-  _globals['_CREATETASKRESPONSE']._serialized_end=563
-  _globals['_LISTTASKSREQUEST']._serialized_start=565
-  _globals['_LISTTASKSREQUEST']._serialized_end=583
-  _globals['_LISTTASKSRESPONSE']._serialized_start=585
-  _globals['_LISTTASKSRESPONSE']._serialized_end=631
-  _globals['_COMPLETETASKREQUEST']._serialized_start=633
-  _globals['_COMPLETETASKREQUEST']._serialized_end=671
-  _globals['_COMPLETETASKRESPONSE']._serialized_start=673
-  _globals['_COMPLETETASKRESPONSE']._serialized_end=712
-  _globals['_CHATSERVICE']._serialized_start=715
-  _globals['_CHATSERVICE']._serialized_end=1107
+  _globals['_SAVECONVERSATIONREQUEST']._serialized_start=113
+  _globals['_SAVECONVERSATIONREQUEST']._serialized_end=187
+  _globals['_SAVECONVERSATIONRESPONSE']._serialized_start=189
+  _globals['_SAVECONVERSATIONRESPONSE']._serialized_end=232
+  _globals['_NOTE']._serialized_start=234
+  _globals['_NOTE']._serialized_end=304
+  _globals['_TASK']._serialized_start=306
+  _globals['_TASK']._serialized_end=396
+  _globals['_SAVENOTEREQUEST']._serialized_start=398
+  _globals['_SAVENOTEREQUEST']._serialized_end=447
+  _globals['_SAVENOTERESPONSE']._serialized_start=449
+  _globals['_SAVENOTERESPONSE']._serialized_end=493
+  _globals['_SEARCHNOTESREQUEST']._serialized_start=495
+  _globals['_SEARCHNOTESREQUEST']._serialized_end=532
+  _globals['_SEARCHNOTESRESPONSE']._serialized_start=534
+  _globals['_SEARCHNOTESRESPONSE']._serialized_end=582
+  _globals['_CREATETASKREQUEST']._serialized_start=584
+  _globals['_CREATETASKREQUEST']._serialized_end=636
+  _globals['_CREATETASKRESPONSE']._serialized_start=638
+  _globals['_CREATETASKRESPONSE']._serialized_end=684
+  _globals['_LISTTASKSREQUEST']._serialized_start=686
+  _globals['_LISTTASKSREQUEST']._serialized_end=704
+  _globals['_LISTTASKSRESPONSE']._serialized_start=706
+  _globals['_LISTTASKSRESPONSE']._serialized_end=752
+  _globals['_COMPLETETASKREQUEST']._serialized_start=754
+  _globals['_COMPLETETASKREQUEST']._serialized_end=792
+  _globals['_COMPLETETASKRESPONSE']._serialized_start=794
+  _globals['_COMPLETETASKRESPONSE']._serialized_end=833
+  _globals['_CHATSERVICE']._serialized_start=836
+  _globals['_CHATSERVICE']._serialized_end=1311
 # @@protoc_insertion_point(module_scope)

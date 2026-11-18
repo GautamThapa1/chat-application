@@ -160,6 +160,27 @@
         border-bottom-left-radius: 5px;
       }
 
+      .msg.thinking {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--muted);
+      }
+
+      .thinking-spinner {
+        width: 15px;
+        height: 15px;
+        flex: 0 0 15px;
+        border: 2px solid #d5e5e2;
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 750ms linear infinite;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
       .msg.system {
         align-self: center;
         padding: 4px 10px;
@@ -230,7 +251,11 @@
       }
 
       @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+        *, *::before, *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+          animation: none !important;
+        }
       }
     </style>
   </head>

@@ -42,6 +42,11 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.ChatMessage.SerializeToString,
                 response_deserializer=chat__pb2.ChatResponse.FromString,
                 _registered_method=True)
+        self.SaveConversation = channel.unary_unary(
+                '/chat.ChatService/SaveConversation',
+                request_serializer=chat__pb2.SaveConversationRequest.SerializeToString,
+                response_deserializer=chat__pb2.SaveConversationResponse.FromString,
+                _registered_method=True)
         self.SaveNote = channel.unary_unary(
                 '/chat.ChatService/SaveNote',
                 request_serializer=chat__pb2.SaveNoteRequest.SerializeToString,
@@ -76,6 +81,12 @@ class ChatServiceServicer:
     """
 
     def SendMessage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SaveConversation(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -118,6 +129,11 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     servicer.SendMessage,
                     request_deserializer=chat__pb2.ChatMessage.FromString,
                     response_serializer=chat__pb2.ChatResponse.SerializeToString,
+            ),
+            'SaveConversation': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveConversation,
+                    request_deserializer=chat__pb2.SaveConversationRequest.FromString,
+                    response_serializer=chat__pb2.SaveConversationResponse.SerializeToString,
             ),
             'SaveNote': grpc.unary_unary_rpc_method_handler(
                     servicer.SaveNote,
@@ -175,6 +191,33 @@ class ChatService:
             '/chat.ChatService/SendMessage',
             chat__pb2.ChatMessage.SerializeToString,
             chat__pb2.ChatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveConversation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/SaveConversation',
+            chat__pb2.SaveConversationRequest.SerializeToString,
+            chat__pb2.SaveConversationResponse.FromString,
             options,
             channel_credentials,
             insecure,
