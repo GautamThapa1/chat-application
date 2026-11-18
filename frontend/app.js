@@ -6,7 +6,7 @@ const logEl = document.getElementById("log");
 const formEl = document.getElementById("form");
 const inputEl = document.getElementById("input");
 const connectionEl = document.getElementById("connection");
-const emptyStateEl = document.getElementById("empty-state");
+const clearButtonEl = document.getElementById("clear");
 
 const ws = new WebSocket(WS_URL);
 
@@ -24,6 +24,10 @@ ws.onerror = (err) => {
   setConnection("Connection error", "error");
   addLine("system", `error: ${err.message || "websocket error"}`);
 };
+
+clearButtonEl.addEventListener("click", () => {
+  logEl.replaceChildren(createEmptyState());
+});
 
 ws.onmessage = (event) => {
   let msg;
@@ -57,7 +61,7 @@ formEl.addEventListener("submit", (e) => {
 });
 
 function addLine(role, content) {
-  emptyStateEl?.remove();
+  logEl.querySelector(".empty-state")?.remove();
 
   const div = document.createElement("div");
   const safeRole = ["user", "assistant"].includes(role) ? role : "system";
@@ -65,6 +69,13 @@ function addLine(role, content) {
   div.textContent = content;
   logEl.appendChild(div);
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function createEmptyState() {
+  const emptyState = document.createElement("p");
+  emptyState.className = "empty-state";
+  emptyState.textContent = "Send a message to start the conversation.";
+  return emptyState;
 }
 
 function setConnection(label, state) {

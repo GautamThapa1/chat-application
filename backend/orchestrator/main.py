@@ -16,7 +16,7 @@ GRPC_TARGET = "localhost:50051"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     channel = grpc.aio.insecure_channel(GRPC_TARGET)
-    app.state.grpc_stub = chat_pb2_grpc.ChatServiceStub(channel)
+    app.state.grpc_stub = chat_pb2_grpc.ChatServiceStub(channel) # stub object
     try:
         yield # code before runs during startup and code after runs after startup
     finally:
@@ -29,7 +29,7 @@ app = FastAPI(title="chat-orchestrator", lifespan=lifespan)
 async def ws_chat(ws: WebSocket):
     await websocket_endpoint(ws, ws.app.state.grpc_stub)
 
-
+# connect the frontend
 app.mount(
     "/",
     StaticFiles(directory="frontend", html=True),

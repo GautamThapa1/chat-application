@@ -5,7 +5,6 @@ import logging
 from fastapi import WebSocket, WebSocketDisconnect
 
 from backend.orchestrator.intent_handler import handle_message
-from backend.service.db import save_message
 
 log = logging.getLogger("orchestrator")
 
@@ -17,9 +16,9 @@ async def websocket_endpoint(websocket: WebSocket, stub) -> None:
     try:
         while True:
             message = await websocket.receive_text()
-            save_message("user", message)
-            response = await handle_message(message, stub)
-            save_message("assistant", response)
+            response = await handle_message(message, stub) # my function
             await websocket.send_json({"role": "assistant", "content": response})
-    except WebSocketDisconnect:
+    except WebSocketDisconnect: # send response to the user
         log.info("WebSocket disconnected")
+
+# ochestrator was accessing the database directly here

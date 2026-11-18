@@ -10,7 +10,7 @@ def get_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-
+# create my tables: messages, notes, tasks
 def init_db():
     conn = get_connection()
     conn.executescript("""

@@ -99,6 +99,26 @@
       .connection.connected::before { background: #2eaa79; }
       .connection.error::before { background: #d97764; }
 
+      .topbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+
+      .clear-button {
+        padding: 8px 11px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .clear-button:hover {
+        border-color: #d6dfdf;
+        background: #f7f9f9;
+        color: #263638;
+      }
+
       #log {
         flex: 1;
         overflow-y: auto;
@@ -224,7 +244,10 @@
             <p class="subtitle">A little space to think out loud</p>
           </div>
         </div>
-        <div id="connection" class="connection" role="status">Connecting</div>
+        <div class="topbar-actions">
+          <div id="connection" class="connection" role="status">Connecting</div>
+          <button id="clear" class="clear-button" type="button">Clear chat</button>
+        </div>
       </header>
 
       <section id="log" aria-label="Conversation" aria-live="polite">
