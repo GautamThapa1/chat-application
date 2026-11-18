@@ -8,6 +8,8 @@ const inputEl = document.getElementById("input");
 const connectionEl = document.getElementById("connection");
 const clearButtonEl = document.getElementById("clear");
 
+let streamingBubble = null;
+
 const ws = new WebSocket(WS_URL);
 
 ws.onopen = () => {
@@ -27,6 +29,7 @@ ws.onerror = (err) => {
 
 clearButtonEl.addEventListener("click", () => {
   logEl.replaceChildren(createEmptyState());
+  streamingBubble = null;
 });
 
 ws.onmessage = (event) => {
@@ -38,7 +41,17 @@ ws.onmessage = (event) => {
     return;
   }
 
-  if (msg.error) {
+  if (msg.type === "start") {
+    streamingBubble = createMessageBubble("assistant");
+  } else if (msg.type === "chunk") {
+    if (!streamingBubble) {
+      streamingBubble = createMessageBubble("assistant");
+    }
+    streamingBubble.textContent += msg.content;
+    logEl.scrollTop = logEl.scrollHeight;
+  } else if (msg.type === "complete") {
+    streamingBubble = null;
+  } else if (msg.error) {
     addLine("system", `error: ${msg.error}`);
   } else {
     addLine(msg.role || "assistant", msg.content);
@@ -63,12 +76,19 @@ formEl.addEventListener("submit", (e) => {
 function addLine(role, content) {
   logEl.querySelector(".empty-state")?.remove();
 
+  const div = createMessageBubble(role);
+  div.textContent = content;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function createMessageBubble(role) {
+  logEl.querySelector(".empty-state")?.remove();
+
   const div = document.createElement("div");
   const safeRole = ["user", "assistant"].includes(role) ? role : "system";
   div.className = `msg ${safeRole}`;
-  div.textContent = content;
   logEl.appendChild(div);
-  logEl.scrollTop = logEl.scrollHeight;
+  return div;
 }
 
 function createEmptyState() {
