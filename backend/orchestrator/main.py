@@ -12,8 +12,9 @@ from google import genai
 from google.genai import types
 
 from backend.generated import chat_pb2_grpc
+from backend.orchestrator import auth
+from backend.orchestrator.grpc_session import SessionStub
 from backend.orchestrator.websocket import websocket_endpoint
-from backend.orchestrator.auth import authenticate_websocket, router as auth_router
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 levels above
 
@@ -54,20 +55,23 @@ app = FastAPI(title="chat-orchestrator", lifespan=lifespan)
 
 @app.websocket("/ws") # frontend connects here
 async def ws_chat(ws: WebSocket):
-    user_id = await authenticate_websocket(ws)
+    user_id = await auth.authenticate_websocket(ws)
     if user_id is None:
         # Closing BEFORE accept() makes the handshake fail with HTTP 403.
         await ws.close(code=1008)  # 1008 = policy violation
         return
-    # TODO: pass user_id down so notes/tasks/messages are per-user (Step 6+).
+    stub = SessionStub(
+        ws.app.state.grpc_stub,
+        ws.cookies[auth.SESSION_COOKIE],
+    )
     await websocket_endpoint(
         ws,
-        ws.app.state.grpc_stub,
+        stub,
         ws.app.state.gemini_client,
         ws.app.state.gemini_model,
     )
 
-app.include_router(auth_router)  # must come BEFORE the "/" static mount
+app.include_router(auth.router)  # must come BEFORE the "/" static mount
 
 # connect the frontend
 app.mount(

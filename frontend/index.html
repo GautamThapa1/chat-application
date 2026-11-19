@@ -235,6 +235,83 @@
       button:active { transform: scale(0.98); }
       button:focus-visible { outline: 3px solid #9ed5ce; outline-offset: 2px; }
 
+      [hidden] { display: none !important; }
+
+      .auth {
+        width: min(100%, 380px);
+        padding: 28px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: #fff;
+        box-shadow: 0 20px 60px rgb(25 48 51 / 8%);
+      }
+
+      .auth h2 {
+        margin: 22px 0 0;
+        font-size: 18px;
+        letter-spacing: -0.02em;
+      }
+
+      .auth form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      .auth label {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .auth input {
+        padding: 12px 15px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        outline: none;
+        background: #f9fbfb;
+        color: #172326;
+        font: inherit;
+        font-size: 14px;
+        transition: border-color 150ms, box-shadow 150ms;
+      }
+
+      .auth input:focus {
+        border-color: #80bcb5;
+        box-shadow: 0 0 0 3px rgb(22 125 115 / 10%);
+      }
+
+      .auth-error {
+        min-height: 18px;
+        margin: 0;
+        color: #b4503f;
+        font-size: 13px;
+      }
+
+      .auth-switch {
+        margin: 16px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        text-align: center;
+      }
+
+      .link-button {
+        padding: 0;
+        background: none;
+        color: var(--accent);
+        font-size: 13px;
+      }
+
+      .link-button:hover {
+        background: none;
+        text-decoration: underline;
+      }
+
+      button:disabled { opacity: 0.6; cursor: default; }
+
       @media (max-width: 520px) {
         body { padding: 0; }
         .chat {
@@ -260,7 +337,31 @@
     </style>
   </head>
   <body>
-    <main class="chat">
+    <section id="auth" class="auth" aria-labelledby="auth-title" hidden>
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">✳</div>
+        <h1>Luma Chat</h1>
+      </div>
+      <h2 id="auth-title">Log in</h2>
+      <form id="auth-form" novalidate>
+        <label>
+          Username
+          <input id="auth-username" autocomplete="username" maxlength="32" required />
+        </label>
+        <label>
+          Password
+          <input id="auth-password" type="password" autocomplete="current-password" maxlength="128" required />
+        </label>
+        <p id="auth-error" class="auth-error" role="alert"></p>
+        <button id="auth-submit" type="submit">Log in</button>
+      </form>
+      <p class="auth-switch">
+        <span id="auth-switch-text">No account yet?</span>
+        <button id="auth-switch" class="link-button" type="button">Create one</button>
+      </p>
+    </section>
+
+    <main id="chat" class="chat" hidden>
       <header class="topbar">
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">✳</div>
@@ -272,6 +373,7 @@
         <div class="topbar-actions">
           <div id="connection" class="connection" role="status">Connecting</div>
           <button id="clear" class="clear-button" type="button">Clear chat</button>
+          <button id="logout" class="clear-button" type="button">Log out</button>
         </div>
       </header>
 

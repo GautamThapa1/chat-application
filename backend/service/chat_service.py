@@ -6,6 +6,7 @@ import grpc
 
 from backend.generated import chat_pb2, chat_pb2_grpc
 from backend.service import db
+from backend.service.auth_interceptor import AuthInterceptor
 
 
 class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
@@ -113,7 +114,10 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
 
 
 def create_server(port: int = 50051) -> grpc.Server:
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        interceptors=[AuthInterceptor()],
+    )
     chat_pb2_grpc.add_ChatServiceServicer_to_server(ChatServicer(), server)
     server.add_insecure_port(f"[::]:{port}")
     return server
