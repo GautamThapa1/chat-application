@@ -401,6 +401,7 @@ async def test_save_conversation():
         "Hello",
         "Hi there!",
         stub,
+        42,
     )
 
     # Assert
@@ -410,3 +411,4 @@ async def test_save_conversation():
 
     assert request.user_content == "Hello"
     assert request.assistant_content == "Hi there!"
+    assert request.conversation_id == 42

@@ -64,6 +64,147 @@ def test_protected_call_with_valid_token_succeeds(stub):
     assert response.note.id > 0
 
 
+def test_conversations_notes_and_tasks_are_isolated(stub):
+    stub.Register(
+        chat_pb2.RegisterRequest(username="alice", password="correct-horse")
+    )
+    stub.Register(
+        chat_pb2.RegisterRequest(username="bob", password="another-horse")
+    )
+    token_a = stub.Login(
+        chat_pb2.LoginRequest(username="alice", password="correct-horse")
+    ).session_token
+    token_b = stub.Login(
+        chat_pb2.LoginRequest(username="bob", password="another-horse")
+    ).session_token
+    metadata_a = ((SESSION_METADATA_KEY, token_a),)
+    metadata_b = ((SESSION_METADATA_KEY, token_b),)
+
+    conversation_a1 = stub.CreateConversation(
+        chat_pb2.CreateConversationRequest(title="Alice one"),
+        metadata=metadata_a,
+    ).conversation
+    conversation_a2 = stub.CreateConversation(
+        chat_pb2.CreateConversationRequest(title="Alice two"),
+        metadata=metadata_a,
+    ).conversation
+    stub.SaveConversation(
+        chat_pb2.SaveConversationRequest(
+            user_content="A's first question",
+            assistant_content="A's first answer",
+            conversation_id=conversation_a1.conversation_id,
+        ),
+        metadata=metadata_a,
+    )
+    stub.SaveConversation(
+        chat_pb2.SaveConversationRequest(
+            user_content="A's second question",
+            assistant_content="A's second answer",
+            conversation_id=conversation_a2.conversation_id,
+        ),
+        metadata=metadata_a,
+    )
+    note = stub.SaveNote(
+        chat_pb2.SaveNoteRequest(title="Alice private", content="secret"),
+        metadata=metadata_a,
+    )
+    task = stub.CreateTask(
+        chat_pb2.CreateTaskRequest(title="Alice task"),
+        metadata=metadata_a,
+    )
+    stub.Logout(chat_pb2.LogoutRequest(session_token=token_a))
+
+    assert not stub.ListConversations(
+        chat_pb2.ListConversationsRequest(), metadata=metadata_b
+    ).conversations
+    with pytest.raises(grpc.RpcError) as get_error:
+        stub.GetConversation(
+            chat_pb2.GetConversationRequest(
+                conversation_id=conversation_a1.conversation_id
+            ),
+            metadata=metadata_b,
+        )
+    assert get_error.value.code() == grpc.StatusCode.NOT_FOUND
+    with pytest.raises(grpc.RpcError) as delete_error:
+        stub.DeleteConversation(
+            chat_pb2.DeleteConversationRequest(
+                conversation_id=conversation_a1.conversation_id
+            ),
+            metadata=metadata_b,
+        )
+    assert delete_error.value.code() == grpc.StatusCode.NOT_FOUND
+    with pytest.raises(grpc.RpcError) as save_error:
+        stub.SaveConversation(
+            chat_pb2.SaveConversationRequest(
+                user_content="intrusion",
+                assistant_content="intrusion",
+                conversation_id=conversation_a1.conversation_id,
+            ),
+            metadata=metadata_b,
+        )
+    assert save_error.value.code() == grpc.StatusCode.NOT_FOUND
+
+    conversation_b = stub.CreateConversation(
+        chat_pb2.CreateConversationRequest(title="Bob's chat"),
+        metadata=metadata_b,
+    ).conversation
+    stub.SaveConversation(
+        chat_pb2.SaveConversationRequest(
+            user_content="B's question",
+            assistant_content="B's answer",
+            conversation_id=conversation_b.conversation_id,
+        ),
+        metadata=metadata_b,
+    )
+    assert not stub.SearchNotes(
+        chat_pb2.SearchNotesRequest(keyword="secret"), metadata=metadata_b
+    ).notes
+    assert not stub.ListTasks(
+        chat_pb2.ListTasksRequest(), metadata=metadata_b
+    ).tasks
+    assert not stub.CompleteTask(
+        chat_pb2.CompleteTaskRequest(task_id=task.task.id),
+        metadata=metadata_b,
+    ).success
+
+    token_a = stub.Login(
+        chat_pb2.LoginRequest(username="alice", password="correct-horse")
+    ).session_token
+    metadata_a = ((SESSION_METADATA_KEY, token_a),)
+    alice_history = stub.GetConversation(
+        chat_pb2.GetConversationRequest(
+            conversation_id=conversation_a1.conversation_id
+        ),
+        metadata=metadata_a,
+    )
+    assert [message.content for message in alice_history.messages] == [
+        "A's first question",
+        "A's first answer",
+    ]
+    assert [item.title for item in stub.ListConversations(
+        chat_pb2.ListConversationsRequest(), metadata=metadata_a
+    ).conversations] == ["Alice two", "Alice one"]
+    assert stub.SearchNotes(
+        chat_pb2.SearchNotesRequest(keyword="secret"), metadata=metadata_a
+    ).notes[0].id == note.note.id
+    assert stub.ListTasks(
+        chat_pb2.ListTasksRequest(), metadata=metadata_a
+    ).tasks[0].id == task.task.id
+
+
+def test_conversation_endpoints_require_a_valid_session(stub):
+    with pytest.raises(grpc.RpcError) as missing:
+        stub.ListConversations(chat_pb2.ListConversationsRequest())
+    assert missing.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+    with pytest.raises(grpc.RpcError) as invalid:
+        stub.GetConversation(
+            chat_pb2.GetConversationRequest(conversation_id=1),
+            metadata=((SESSION_METADATA_KEY, "invalid"),),
+        )
+    assert invalid.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
 def test_public_methods_work_without_a_token(stub):
     registered = stub.Register(
         chat_pb2.RegisterRequest(username="bob", password="correct-horse")

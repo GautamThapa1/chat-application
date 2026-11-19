@@ -12,13 +12,13 @@ from google import genai
 from google.genai import types
 
 from backend.generated import chat_pb2_grpc
-from backend.orchestrator import auth
+from backend.orchestrator import auth, conversations
 from backend.orchestrator.grpc_session import SessionStub
 from backend.orchestrator.websocket import websocket_endpoint
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 levels above
 
-GRPC_TARGET = "localhost:50051"
+GRPC_TARGET = "127.0.0.1:50051"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 
@@ -72,6 +72,7 @@ async def ws_chat(ws: WebSocket):
     )
 
 app.include_router(auth.router)  # must come BEFORE the "/" static mount
+app.include_router(conversations.router)
 
 # connect the frontend
 app.mount(

@@ -30,16 +30,112 @@
       }
 
       .chat {
-        width: min(100%, 680px);
-        height: min(760px, calc(100vh - 56px));
-        min-height: 420px;
+        min-width: 0;
+        height: 100%;
         display: flex;
         flex-direction: column;
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        width: min(100%, 980px);
+        height: min(760px, calc(100vh - 56px));
+        min-height: 420px;
         overflow: hidden;
         border: 1px solid var(--line);
         border-radius: 20px;
         background: #fff;
         box-shadow: 0 20px 60px rgb(25 48 51 / 8%);
+      }
+
+      .sidebar {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 18px 12px;
+        border-right: 1px solid var(--line);
+        background: #fbfcfc;
+      }
+
+      .sidebar-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 0 4px;
+      }
+
+      .sidebar-heading h2 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      #new-chat {
+        padding: 8px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      #conversations {
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        overflow-y: auto;
+      }
+
+      .conversation-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+        padding: 3px;
+        border-radius: 10px;
+      }
+
+      .conversation-item.active { background: #eaf3f2; }
+
+      .conversation-select {
+        min-width: 0;
+        flex: 1;
+        overflow: hidden;
+        padding: 8px;
+        background: transparent;
+        color: #354548;
+        font-size: 12px;
+        font-weight: 500;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .conversation-select:hover,
+      .conversation-item.active .conversation-select {
+        background: transparent;
+        color: var(--accent);
+      }
+
+      .conversation-delete {
+        flex: 0 0 auto;
+        padding: 6px 8px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .conversation-delete:hover {
+        background: #fff0ee;
+        color: #a63e30;
+      }
+
+      .conversation-empty {
+        padding: 8px;
+        color: var(--muted);
+        font-size: 12px;
       }
 
       .topbar {
@@ -314,13 +410,28 @@
 
       @media (max-width: 520px) {
         body { padding: 0; }
-        .chat {
+        .workspace {
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-rows: auto minmax(0, 1fr);
           width: 100%;
           height: 100vh;
           min-height: 0;
           border: 0;
           border-radius: 0;
         }
+        .sidebar {
+          max-height: 150px;
+          gap: 8px;
+          padding: 10px;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        #conversations {
+          flex-direction: row;
+          overflow-x: auto;
+          overflow-y: hidden;
+        }
+        .conversation-item { min-width: 150px; }
         .topbar { padding: 16px 18px; }
         #log { padding: 20px 16px; }
         .composer { padding: 12px; }
@@ -361,30 +472,40 @@
       </p>
     </section>
 
-    <main id="chat" class="chat" hidden>
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark" aria-hidden="true">✳</div>
-          <div>
-            <h1>Luma Chat</h1>
-            <p class="subtitle">A little space to think out loud</p>
+    <main id="chat" class="workspace" hidden>
+      <aside class="sidebar" aria-label="Conversation history">
+        <div class="sidebar-heading">
+          <h2>Chats</h2>
+          <button id="new-chat" type="button">New chat</button>
+        </div>
+        <nav id="conversations" aria-label="Conversations"></nav>
+      </aside>
+
+      <section class="chat">
+        <header class="topbar">
+          <div class="brand">
+            <div class="brand-mark" aria-hidden="true">✳</div>
+            <div>
+              <h1>Luma Chat</h1>
+              <p class="subtitle">A little space to think out loud</p>
+            </div>
           </div>
-        </div>
-        <div class="topbar-actions">
-          <div id="connection" class="connection" role="status">Connecting</div>
-          <button id="clear" class="clear-button" type="button">Clear chat</button>
-          <button id="logout" class="clear-button" type="button">Log out</button>
-        </div>
-      </header>
+          <div class="topbar-actions">
+            <div id="connection" class="connection" role="status">Disconnected</div>
+            <button id="clear" class="clear-button" type="button">Clear chat</button>
+            <button id="logout" class="clear-button" type="button">Log out</button>
+          </div>
+        </header>
 
-      <section id="log" aria-label="Conversation" aria-live="polite">
-        <p id="empty-state" class="empty-state">Send a message to start the conversation.</p>
+        <section id="log" aria-label="Conversation" aria-live="polite">
+          <p id="empty-state" class="empty-state">Send a message to start the conversation.</p>
+        </section>
+
+        <form id="form" class="composer">
+          <input id="input" autocomplete="off" placeholder="Write a message..." aria-label="Message" />
+          <button type="submit">Send</button>
+        </form>
       </section>
-
-      <form id="form" class="composer">
-        <input id="input" autocomplete="off" placeholder="Write a message..." aria-label="Message" />
-        <button type="submit">Send</button>
-      </form>
     </main>
     <script src="app.js"></script>
   </body>

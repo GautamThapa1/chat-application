@@ -69,3 +69,37 @@ async def test_stream_chat_response_skips_empty_chunks():
 
     # Assert
     assert chunks == ["Hello", "!"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_response_includes_only_the_selected_chat_history():
+    async def fake_stream():
+        yield SimpleNamespace(text="answer")
+
+    generate_stream = AsyncMock(return_value=fake_stream())
+    gemini_client = SimpleNamespace(
+        models=SimpleNamespace(generate_content_stream=generate_stream)
+    )
+
+    chunks = [
+        chunk
+        async for chunk in stream_chat_response(
+            "Current question",
+            gemini_client,
+            "test-model",
+            [
+                {"role": "user", "content": "Previous question"},
+                {"role": "assistant", "content": "Previous answer"},
+            ],
+        )
+    ]
+
+    assert chunks == ["answer"]
+    call = generate_stream.await_args.kwargs
+    contents = call["contents"]
+    assert [item.role for item in contents] == ["user", "model", "user"]
+    assert [item.parts[0].text for item in contents] == [
+        "Previous question",
+        "Previous answer",
+        "Current question",
+    ]

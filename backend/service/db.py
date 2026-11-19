@@ -1,4 +1,4 @@
-"""SQLite persistence: messages, notes, tasks."""
+"""SQLite persistence for accounts and user-owned application data."""
 
 import hashlib
 import hmac
@@ -17,159 +17,318 @@ def get_connection():
     conn.execute("PRAGMA foreign_keys = ON") # don't allow invalid user and CASCADE on delete functionality
     return conn
 
-# create my tables: messages, notes, tasks
+
+def _table_exists(conn, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone() is not None
+
+
+def _table_columns(conn, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _preserve_unowned_table(conn, table: str, ownership_columns: set[str]) -> None:
+    if not _table_exists(conn, table):
+        return
+    if ownership_columns.issubset(_table_columns(conn, table)):
+        return
+
+    legacy_table = f"legacy_{table}"
+    if _table_exists(conn, legacy_table):
+        raise RuntimeError(
+            f"Cannot migrate {table}: {legacy_table} already exists. "
+            "Resolve the existing legacy table before retrying."
+        )
+    conn.execute(f'ALTER TABLE "{table}" RENAME TO "{legacy_table}"')
+
+
 def init_db():
     conn = get_connection()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            role       TEXT NOT NULL,
-            content    TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS notes (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            title      TEXT NOT NULL,
-            content    TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS tasks (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            title      TEXT NOT NULL,
-            due_date   TEXT,
-            completed  INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS users (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            password_hash TEXT NOT NULL,
-            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS sessions (
-            token_hash TEXT PRIMARY KEY,
-            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            created_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL
-        );
-    """)
-    conn.commit()
-    conn.close()
-
-
-# --------------------------------------------------------------------------- #
-# Messages (existing)
-# --------------------------------------------------------------------------- #
-def save_message(role: str, content: str) -> int:
-    conn = get_connection()
-    cur = conn.execute(
-        "INSERT INTO messages (role, content) VALUES (?, ?)",
-        (role, content),
-    )
-    conn.commit()
-    msg_id = cur.lastrowid
-    conn.close()
-    return msg_id
-
-
-def save_conversation(user_content: str, assistant_content: str) -> None:
-    conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         with conn:
-            conn.executemany(
-                "INSERT INTO messages (role, content) VALUES (?, ?)",
-                (
-                    ("user", user_content),
-                    ("assistant", assistant_content),
-                ),
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    password_hash TEXT NOT NULL,
+                    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                )
+            """)
+
+            _preserve_unowned_table(conn, "messages", {"user_id", "conversation_id"})
+            _preserve_unowned_table(conn, "notes", {"user_id"})
+            _preserve_unowned_table(conn, "tasks", {"user_id"})
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    conversation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    title           TEXT NOT NULL,
+                    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (conversation_id, user_id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    message_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id INTEGER NOT NULL,
+                    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                    content         TEXT NOT NULL,
+                    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (conversation_id, user_id)
+                        REFERENCES conversations(conversation_id, user_id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS notes (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    title      TEXT NOT NULL,
+                    content    TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    title      TEXT NOT NULL,
+                    due_date   TEXT,
+                    completed  INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_user_updated "
+                "ON conversations(user_id, updated_at DESC, conversation_id DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_conversation "
+                "ON messages(user_id, conversation_id, message_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notes_user "
+                "ON notes(user_id, id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_user_status "
+                "ON tasks(user_id, completed, id)"
             )
     finally:
         conn.close()
 
 
-def get_messages() -> list[dict]:
+# --------------------------------------------------------------------------- #
+# Conversations and messages
+# --------------------------------------------------------------------------- #
+class ConversationNotFound(LookupError):
+    """Raised when a conversation is missing or belongs to another user."""
+
+
+def create_conversation(user_id: int, title: str = "New chat") -> dict:
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT id, role, content, created_at FROM messages ORDER BY id"
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO conversations (user_id, title) VALUES (?, ?)",
+                (user_id, title.strip()[:120] or "New chat"),
+            )
+            row = conn.execute(
+                "SELECT conversation_id AS id, user_id, title, created_at, updated_at "
+                "FROM conversations WHERE conversation_id = ? AND user_id = ?",
+                (cur.lastrowid, user_id),
+            ).fetchone()
+            return dict(row)
+    finally:
+        conn.close()
+
+
+def list_conversations(user_id: int) -> list[dict]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT conversation_id AS id, user_id, title, created_at, updated_at "
+            "FROM conversations WHERE user_id = ? "
+            "ORDER BY updated_at DESC, conversation_id DESC",
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_conversation(user_id: int, conversation_id: int) -> dict | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT conversation_id AS id, user_id, title, created_at, updated_at "
+            "FROM conversations WHERE conversation_id = ? AND user_id = ?",
+            (conversation_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_conversation_messages(user_id: int, conversation_id: int) -> list[dict]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """SELECT message_id AS id, conversation_id, user_id, role, content, created_at
+                 FROM messages
+                WHERE conversation_id = ? AND user_id = ?
+                ORDER BY id""",
+            (conversation_id, user_id),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def delete_conversation(user_id: int, conversation_id: int) -> bool:
+    conn = get_connection()
+    try:
+        with conn:
+            deleted = conn.execute(
+                "DELETE FROM conversations WHERE conversation_id = ? AND user_id = ?",
+                (conversation_id, user_id),
+            )
+            return deleted.rowcount == 1
+    finally:
+        conn.close()
+
+
+def save_conversation(
+    user_id: int,
+    conversation_id: int,
+    user_content: str,
+    assistant_content: str,
+) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            conversation = conn.execute(
+                "SELECT title FROM conversations WHERE conversation_id = ? AND user_id = ?",
+                (conversation_id, user_id),
+            ).fetchone()
+            if conversation is None:
+                raise ConversationNotFound
+
+            conn.executemany(
+                """INSERT INTO messages
+                   (conversation_id, user_id, role, content)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    (conversation_id, user_id, "user", user_content),
+                    (conversation_id, user_id, "assistant", assistant_content),
+                ),
+            )
+            title = conversation["title"]
+            if title == "New chat":
+                first_line = user_content.strip().splitlines()
+                if first_line:
+                    title = first_line[0][:80]
+            conn.execute(
+                """UPDATE conversations
+                      SET title = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE conversation_id = ? AND user_id = ?""",
+                (title, conversation_id, user_id),
+            )
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------- #
 # Notes
 # --------------------------------------------------------------------------- #
-def save_note(title: str, content: str) -> int:
+def save_note(user_id: int, title: str, content: str) -> int:
     """Insert a note and return its id."""
     conn = get_connection()
-    cur = conn.execute(
-        "INSERT INTO notes (title, content) VALUES (?, ?)",
-        (title, content),
-    )
-    conn.commit()
-    note_id = cur.lastrowid
-    conn.close()
-    return note_id
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO notes (user_id, title, content) VALUES (?, ?, ?)",
+                (user_id, title, content),
+            )
+            return cur.lastrowid
+    finally:
+        conn.close()
 
 
-def search_notes(keyword: str) -> list[dict]:
+def search_notes(user_id: int, keyword: str) -> list[dict]:
     """Return notes whose title or content contains `keyword` (case-insensitive)."""
     conn = get_connection()
-    like = f"%{keyword}%"
-    rows = conn.execute(
-        """SELECT id, title, content, created_at
-             FROM notes
-            WHERE title LIKE ? OR content LIKE ?
-            ORDER BY id""",
-        (like, like),
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        like = f"%{keyword}%"
+        rows = conn.execute(
+            """SELECT id, title, content, created_at
+                 FROM notes
+                WHERE user_id = ? AND (title LIKE ? OR content LIKE ?)
+                ORDER BY id""",
+            (user_id, like, like),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------- #
 # Tasks
 # --------------------------------------------------------------------------- #
-def create_task(title: str, due_date: str | None = None) -> int:
+def create_task(user_id: int, title: str, due_date: str | None = None) -> int:
     """Insert a task and return its id. `due_date` is a free-form string (e.g. '2026-12-01')."""
     conn = get_connection()
-    cur = conn.execute(
-        "INSERT INTO tasks (title, due_date) VALUES (?, ?)",
-        (title, due_date),
-    )
-    conn.commit()
-    task_id = cur.lastrowid
-    conn.close()
-    return task_id
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO tasks (user_id, title, due_date) VALUES (?, ?, ?)",
+                (user_id, title, due_date),
+            )
+            return cur.lastrowid
+    finally:
+        conn.close()
 
 
-def get_tasks() -> list[dict]:
+def get_tasks(user_id: int) -> list[dict]:
     """Return all tasks, incomplete first, then by id."""
     conn = get_connection()
-    rows = conn.execute(
-        """SELECT id, title, due_date, completed, created_at
-             FROM tasks
-            ORDER BY completed ASC, id ASC"""
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        rows = conn.execute(
+            """SELECT id, title, due_date, completed, created_at
+                 FROM tasks
+                WHERE user_id = ?
+                ORDER BY completed ASC, id ASC""",
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
-def complete_task(task_id: int) -> bool:
+def complete_task(user_id: int, task_id: int) -> bool:
     """Mark a task complete. Returns True if a row was updated, False if not found."""
     conn = get_connection()
-    cur = conn.execute(
-        "UPDATE tasks SET completed = 1 WHERE id = ?",
-        (task_id,),
-    )
-    conn.commit()
-    updated = cur.rowcount > 0
-    conn.close()
-    return updated
+    try:
+        with conn:
+            cur = conn.execute(
+                "UPDATE tasks SET completed = 1 WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
+            return cur.rowcount > 0
+    finally:
+        conn.close()
 
 # --------------------------------------------------------------------------- #
 # Password hashing

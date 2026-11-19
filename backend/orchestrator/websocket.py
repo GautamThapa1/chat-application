@@ -8,6 +8,7 @@ import grpc
 from fastapi import WebSocket, WebSocketDisconnect
 from google.genai import errors
 
+from backend.generated import chat_pb2
 from backend.orchestrator.gemini_service import stream_chat_response
 from backend.orchestrator.intent_handler import (
     classify_message,
@@ -41,8 +42,15 @@ async def websocket_endpoint(
             if isinstance(payload, dict) and payload.get("type") == "message":
                 message = payload.get("content")
                 request_id = payload.get("request_id")
+                conversation_id = payload.get("conversation_id")
 
-                if not isinstance(message, str) or not isinstance(request_id, str):
+                if (
+                    not isinstance(message, str)
+                    or not isinstance(request_id, str)
+                    or isinstance(conversation_id, bool)
+                    or not isinstance(conversation_id, int)
+                    or conversation_id < 1
+                ):
                     await websocket.send_json({
                         "type": "error",
                         "request_id": request_id,
@@ -50,10 +58,26 @@ async def websocket_endpoint(
                     })
                     continue
             else:
-                message = raw_message
-                request_id = None
+                await websocket.send_json({
+                    "type": "error",
+                    "request_id": None,
+                    "error": "Invalid message payload.",
+                })
+                continue
 
             try:
+                # The gRPC service filters by the authenticated user and returns
+                # NOT_FOUND for both missing and foreign conversation IDs.
+                conversation = await stub.GetConversation(
+                    chat_pb2.GetConversationRequest(
+                        conversation_id=conversation_id,
+                    )
+                )
+                history = [
+                    {"role": item.role, "content": item.content}
+                    for item in conversation.messages
+                ]
+
                 # Step 1: Classify the user's message.
                 decision = await classify_message(
                     message,
@@ -75,6 +99,7 @@ async def websocket_endpoint(
                         message,
                         gemini_client,
                         model,
+                        history,
                     ):
                         response_chunks.append(chunk)
 
@@ -108,7 +133,9 @@ async def websocket_endpoint(
                     })
 
                 # Step 4: Save the completed exchange through gRPC.
-                await save_conversation(message, response, stub)
+                await save_conversation(
+                    message, response, stub, conversation_id
+                )
 
                 # Step 5: Tell the frontend the response is complete.
                 await websocket.send_json({

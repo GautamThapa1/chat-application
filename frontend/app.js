@@ -8,6 +8,8 @@ const inputEl = document.getElementById("input");
 const connectionEl = document.getElementById("connection");
 const clearButtonEl = document.getElementById("clear");
 const logoutButtonEl = document.getElementById("logout");
+const newChatButtonEl = document.getElementById("new-chat");
+const conversationsEl = document.getElementById("conversations");
 
 const chatEl = document.getElementById("chat");
 const authEl = document.getElementById("auth");
@@ -24,6 +26,10 @@ const pendingBubbles = new Map();
 let nextRequestId = 0;
 let ws = null;
 let authMode = "login";
+let conversations = [];
+let activeConversationId = null;
+let conversationLoadGeneration = 0;
+let userStateGeneration = 0;
 
 async function api(path, method = "GET", body) {
   const options = { method, headers: {} };
@@ -52,7 +58,20 @@ function errorMessage(data) {
   return "Something went wrong. Please try again.";
 }
 
+function clearUserState() {
+  userStateGeneration += 1;
+  const socket = ws;
+  ws = null;
+  socket?.close();
+  conversationLoadGeneration += 1;
+  conversations = [];
+  activeConversationId = null;
+  renderConversations();
+  resetChat();
+}
+
 function showAuth(message = "") {
+  clearUserState();
   chatEl.hidden = true;
   authEl.hidden = false;
   authErrorEl.textContent = message;
@@ -112,9 +131,10 @@ authFormEl.addEventListener("submit", async (e) => {
     }
 
     authPasswordEl.value = "";
+    clearUserState();
     setAuthMode("login");
     showChat();
-    connectWebSocket();
+    await loadConversations();
   } catch {
     authErrorEl.textContent = "Could not reach the server.";
   } finally {
@@ -123,10 +143,8 @@ authFormEl.addEventListener("submit", async (e) => {
 });
 
 logoutButtonEl.addEventListener("click", async () => {
-  const socket = ws;
-  ws = null;
-  socket?.close();
-
+  clearUserState();
+  setConnection("Disconnected", "error");
   let message = "";
   try {
     const result = await api("/api/logout", "POST");
@@ -136,8 +154,6 @@ logoutButtonEl.addEventListener("click", async () => {
   } catch {
     message = "Could not reach the server to end your session.";
   }
-  resetChat();
-  setConnection("Disconnected", "error");
   showAuth(message);
 });
 
@@ -145,8 +161,9 @@ async function checkSession() {
   try {
     const me = await api("/api/me");
     if (me.ok) {
+      clearUserState();
       showChat();
-      connectWebSocket();
+      await loadConversations();
     } else if (me.status === 401) {
       showAuth();
     } else {
@@ -157,24 +174,202 @@ async function checkSession() {
   }
 }
 
-function connectWebSocket() {
-  if (ws) {
-    const old = ws;
-    ws = null;
-    old.close();
+async function loadConversations() {
+  clearUserState();
+  const generation = userStateGeneration;
+  try {
+    const result = await api("/api/conversations");
+    if (generation !== userStateGeneration) return;
+    if (!result.ok) {
+      if (result.status === 401) {
+        showAuth("Your session has ended. Please log in again.");
+      } else {
+        addLine("system", errorMessage(result.data));
+        setConnection("Could not load chats", "error");
+      }
+      return;
+    }
+
+    conversations = result.data.conversations;
+    renderConversations();
+    setConnection(
+      conversations.length ? "Select a chat" : "Start a new chat",
+      "",
+    );
+    if (!conversations.length) resetChat();
+  } catch {
+    if (generation === userStateGeneration) {
+      addLine("system", "Could not reach the server to load chats.");
+      setConnection("Could not load chats", "error");
+    }
+  }
+}
+
+function renderConversations() {
+  conversationsEl.replaceChildren();
+  if (!conversations.length) {
+    const empty = document.createElement("p");
+    empty.className = "conversation-empty";
+    empty.textContent = "No chats yet";
+    conversationsEl.appendChild(empty);
+    return;
   }
 
+  for (const conversation of conversations) {
+    const item = document.createElement("div");
+    item.className = "conversation-item";
+    if (conversation.conversation_id === activeConversationId) item.classList.add("active");
+
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "conversation-select";
+    select.textContent = conversation.title || "New chat";
+    select.title = conversation.title || "New chat";
+    select.addEventListener("click", () => {
+      void selectConversation(conversation.conversation_id);
+    });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "conversation-delete";
+    remove.textContent = "Delete";
+    remove.setAttribute("aria-label", `Delete ${conversation.title || "conversation"}`);
+    remove.addEventListener("click", () => {
+      void deleteConversation(conversation.conversation_id);
+    });
+
+    item.append(select, remove);
+    conversationsEl.appendChild(item);
+  }
+}
+
+newChatButtonEl.addEventListener("click", () => {
+  void createConversation();
+});
+
+async function createConversation() {
+  const generation = userStateGeneration;
+  newChatButtonEl.disabled = true;
+  try {
+    const result = await api("/api/conversations", "POST", { title: "New chat" });
+    if (generation !== userStateGeneration) return;
+    if (!result.ok) {
+      if (result.status === 401) {
+        showAuth("Your session has ended. Please log in again.");
+      } else {
+        addLine("system", errorMessage(result.data));
+      }
+      return;
+    }
+    conversations = [result.data.conversation, ...conversations];
+    renderConversations();
+    await selectConversation(result.data.conversation.conversation_id);
+  } catch {
+    if (generation === userStateGeneration) {
+      addLine("system", "Could not reach the server to create a chat.");
+    }
+  } finally {
+    newChatButtonEl.disabled = false;
+  }
+}
+
+async function selectConversation(conversationId) {
+  const userGeneration = userStateGeneration;
+  const socket = ws;
+  ws = null;
+  socket?.close();
+  activeConversationId = conversationId;
+  const generation = ++conversationLoadGeneration;
+  resetChat();
+  renderConversations();
+  setConnection("Loading chat", "");
+
+  try {
+    const result = await api(`/api/conversations/${conversationId}`);
+    if (
+      userGeneration !== userStateGeneration
+      || generation !== conversationLoadGeneration
+    ) return;
+    if (!result.ok) {
+      if (result.status === 401) {
+        showAuth("Your session has ended. Please log in again.");
+      } else {
+        addLine("system", errorMessage(result.data));
+        setConnection("Could not load chat", "error");
+      }
+      return;
+    }
+
+    if (result.data.messages.length) {
+      for (const message of result.data.messages) {
+        addLine(message.role, message.content);
+      }
+    } else {
+      resetChat();
+    }
+    connectWebSocket(conversationId);
+  } catch {
+    if (
+      userGeneration === userStateGeneration
+      && generation === conversationLoadGeneration
+    ) {
+      addLine("system", "Could not reach the server to load this chat.");
+      setConnection("Could not load chat", "error");
+    }
+  }
+}
+
+async function deleteConversation(conversationId) {
+  const generation = userStateGeneration;
+  try {
+    const result = await api(`/api/conversations/${conversationId}`, "DELETE");
+    if (generation !== userStateGeneration) return;
+    if (!result.ok) {
+      if (result.status === 401) {
+        showAuth("Your session has ended. Please log in again.");
+      } else {
+        setConnection(errorMessage(result.data), "error");
+      }
+      return;
+    }
+
+    conversations = conversations.filter(
+      (item) => item.conversation_id !== conversationId,
+    );
+    if (activeConversationId === conversationId) {
+      const socket = ws;
+      ws = null;
+      socket?.close();
+      activeConversationId = null;
+      resetChat();
+    }
+    renderConversations();
+    if (activeConversationId === null && conversations.length) {
+      await selectConversation(conversations[0].id);
+    } else if (activeConversationId === null) {
+      setConnection("Start a new chat", "");
+    }
+  } catch {
+    if (generation === userStateGeneration) {
+      setConnection("Could not reach the server to delete this chat.", "error");
+    }
+  }
+}
+
+function connectWebSocket(conversationId) {
+  if (activeConversationId !== conversationId) return;
   const socket = new WebSocket(WS_URL);
   ws = socket;
   setConnection("Connecting", "");
 
   socket.onopen = () => {
+    if (socket !== ws || activeConversationId !== conversationId) return;
     setConnection("Connected", "connected");
     addLine("system", "connected");
   };
 
   socket.onclose = async () => {
-    if (socket !== ws) return;
+    if (socket !== ws || activeConversationId !== conversationId) return;
     setConnection("Disconnected", "error");
     removePendingBubbles();
     addLine("system", "disconnected");
@@ -182,23 +377,22 @@ function connectWebSocket() {
     try {
       const me = await api("/api/me");
       if (me.status === 401) {
-        ws = null;
-        resetChat();
         showAuth("Your session has ended. Please log in again.");
       }
     } catch {
-      // The chat remains visible with its disconnected status if the server is unreachable.
+      setConnection("Disconnected: server unavailable", "error");
     }
   };
 
   socket.onerror = (err) => {
-    if (socket !== ws) return;
+    if (socket !== ws || activeConversationId !== conversationId) return;
     setConnection("Connection error", "error");
     removePendingBubbles();
     addLine("system", `error: ${err.message || "websocket error"}`);
   };
 
   socket.onmessage = (event) => {
+    if (socket !== ws || activeConversationId !== conversationId) return;
     let msg;
     try {
       msg = JSON.parse(event.data);
@@ -222,6 +416,7 @@ function connectWebSocket() {
       }
     } else if (msg.type === "complete") {
       pendingBubbles.delete(msg.request_id);
+      refreshConversationTitle(conversationId);
     } else if (msg.type === "error" || msg.error) {
       const bubble = pendingBubbles.get(msg.request_id);
       bubble?.remove();
@@ -233,9 +428,32 @@ function connectWebSocket() {
   };
 }
 
+async function refreshConversationTitle(conversationId) {
+  const generation = userStateGeneration;
+  try {
+    const result = await api(`/api/conversations/${conversationId}`);
+    if (generation !== userStateGeneration || activeConversationId !== conversationId) return;
+    if (!result.ok) {
+      if (result.status === 401) {
+        showAuth("Your session has ended. Please log in again.");
+      } else {
+        setConnection("Could not refresh chat title", "error");
+      }
+      return;
+    }
+    conversations = conversations.map((item) =>
+      item.conversation_id === conversationId ? result.data.conversation : item,
+    );
+    renderConversations();
+  } catch {
+    if (generation === userStateGeneration) {
+      setConnection("Chat saved; title refresh failed", "error");
+    }
+  }
+}
+
 clearButtonEl.addEventListener("click", () => {
-  logEl.replaceChildren(createEmptyState());
-  pendingBubbles.clear();
+  resetChat();
 });
 
 formEl.addEventListener("submit", (e) => {
@@ -243,13 +461,22 @@ formEl.addEventListener("submit", (e) => {
   const text = inputEl.value.trim();
   if (!text) return;
 
+  if (!activeConversationId) {
+    addLine("system", "Create or select a chat before sending a message.");
+    return;
+  }
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    addLine("system", "not connected — try again in a moment");
+    addLine("system", "Not connected — try again in a moment.");
     return;
   }
 
   const requestId = String(++nextRequestId);
-  ws.send(JSON.stringify({ type: "message", request_id: requestId, content: text }));
+  ws.send(JSON.stringify({
+    type: "message",
+    request_id: requestId,
+    conversation_id: activeConversationId,
+    content: text,
+  }));
   addLine("user", text);
   pendingBubbles.set(requestId, createThinkingBubble());
   inputEl.value = "";

@@ -209,12 +209,18 @@ async def execute_action(decision: dict, stub) -> str:
     raise ValueError(f"Unsupported intent: {intent}")
 
 
-async def save_conversation(message: str, response: str, stub) -> None:
+async def save_conversation(
+    message: str,
+    response: str,
+    stub,
+    conversation_id: int,
+) -> None:
     """Persist the completed exchange through gRPC."""
 
     await stub.SaveConversation(
         chat_pb2.SaveConversationRequest(
             user_content=message,
             assistant_content=response,
+            conversation_id=conversation_id,
         )
     )

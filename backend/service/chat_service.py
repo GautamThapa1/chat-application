@@ -6,15 +6,25 @@ import grpc
 
 from backend.generated import chat_pb2, chat_pb2_grpc
 from backend.service import db
-from backend.service.auth_interceptor import AuthInterceptor
+from backend.service.auth_interceptor import AuthInterceptor, current_user_id
 
 
 class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
 
     def SendMessage(self, request, context):
-        db.save_message(request.role or "user", request.content)
+        user_id = current_user_id()
+        if request.role not in {"", "user"}:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Only user messages are accepted.")
         reply = f"Echo: {request.content}"
-        db.save_message("assistant", reply)
+        try:
+            db.save_conversation(
+                user_id,
+                request.conversation_id,
+                request.content,
+                reply,
+            )
+        except db.ConversationNotFound:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Conversation not found.")
         return chat_pb2.ChatResponse(role="assistant", content=reply)
 
     # ---------------------------------------------------------------- #
@@ -49,14 +59,66 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
 
     def SaveConversation(self, request, context):
-        db.save_conversation(request.user_content, request.assistant_content)
+        try:
+            db.save_conversation(
+                current_user_id(),
+                request.conversation_id,
+                request.user_content,
+                request.assistant_content,
+            )
+        except db.ConversationNotFound:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Conversation not found.")
         return chat_pb2.SaveConversationResponse(success=True)
+
+    def CreateConversation(self, request, context):
+        conversation = db.create_conversation(current_user_id(), request.title)
+        return chat_pb2.CreateConversationResponse(
+            conversation=_conversation_message(conversation)
+        )
+
+    def ListConversations(self, request, context):
+        return chat_pb2.ListConversationsResponse(
+            conversations=[
+                _conversation_message(row)
+                for row in db.list_conversations(current_user_id())
+            ]
+        )
+
+    def GetConversation(self, request, context):
+        user_id = current_user_id()
+        conversation = db.get_conversation(user_id, request.conversation_id)
+        if conversation is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Conversation not found.")
+        return chat_pb2.GetConversationResponse(
+            conversation=_conversation_message(conversation),
+            messages=[
+                chat_pb2.ConversationMessage(
+                    message_id=row["id"],
+                    conversation_id=row["conversation_id"],
+                    user_id=row["user_id"],
+                    role=row["role"],
+                    content=row["content"],
+                    created_at=str(row["created_at"] or ""),
+                )
+                for row in db.get_conversation_messages(
+                    user_id, request.conversation_id
+                )
+            ],
+        )
+
+    def DeleteConversation(self, request, context):
+        deleted = db.delete_conversation(
+            current_user_id(), request.conversation_id
+        )
+        if not deleted:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Conversation not found.")
+        return chat_pb2.DeleteConversationResponse(success=True)
 
     # ---------------------------------------------------------------- #
     # Notes  (db.save_note / db.search_notes)
     # ---------------------------------------------------------------- #
     def SaveNote(self, request, context):
-        note_id = db.save_note(request.title, request.content)
+        note_id = db.save_note(current_user_id(), request.title, request.content)
         return chat_pb2.SaveNoteResponse(
             note=chat_pb2.Note(
                 id=note_id,
@@ -66,7 +128,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
 
     def SearchNotes(self, request, context):
-        rows = db.search_notes(request.keyword)
+        rows = db.search_notes(current_user_id(), request.keyword)
         return chat_pb2.SearchNotesResponse(
             notes=[
                 chat_pb2.Note(
@@ -83,7 +145,9 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
     # Tasks  (db.create_task / db.get_tasks / db.complete_task)
     # ---------------------------------------------------------------- #
     def CreateTask(self, request, context):
-        task_id = db.create_task(request.title, due_date=request.due_date or None)
+        task_id = db.create_task(
+            current_user_id(), request.title, due_date=request.due_date or None
+        )
         return chat_pb2.CreateTaskResponse(
             task=chat_pb2.Task(
                 id=task_id,
@@ -94,7 +158,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
 
     def ListTasks(self, request, context):
-        rows = db.get_tasks()
+        rows = db.get_tasks(current_user_id())
         return chat_pb2.ListTasksResponse(
             tasks=[
                 chat_pb2.Task(
@@ -109,8 +173,18 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
 
     def CompleteTask(self, request, context):
-        ok = db.complete_task(request.task_id)
+        ok = db.complete_task(current_user_id(), request.task_id)
         return chat_pb2.CompleteTaskResponse(success=ok)
+
+
+def _conversation_message(row: dict) -> chat_pb2.Conversation:
+    return chat_pb2.Conversation(
+        conversation_id=row["id"],
+        user_id=row["user_id"],
+        title=row["title"],
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+    )
 
 
 def create_server(port: int = 50051) -> grpc.Server:
@@ -119,5 +193,5 @@ def create_server(port: int = 50051) -> grpc.Server:
         interceptors=[AuthInterceptor()],
     )
     chat_pb2_grpc.add_ChatServiceServicer_to_server(ChatServicer(), server)
-    server.add_insecure_port(f"[::]:{port}")
+    server.add_insecure_port(f"127.0.0.1:{port}")
     return server
