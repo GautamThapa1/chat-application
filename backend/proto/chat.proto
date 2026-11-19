@@ -89,10 +89,51 @@ message CompleteTaskResponse {
 }
 
 // =========================================================================== #
+// Auth request/response
+// =========================================================================== #
+message RegisterRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message RegisterResponse {
+  int64 user_id = 1;
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string session_token = 1;
+  int64  user_id       = 2;
+}
+
+message LogoutRequest {
+  string session_token = 1;
+}
+
+message LogoutResponse {}
+
+message ValidateSessionRequest {
+  string session_token = 1;
+}
+
+message ValidateSessionResponse {
+  bool  valid   = 1;
+  int64 user_id = 2;
+}
+
+// =========================================================================== #
 // Service
 // =========================================================================== #
 service ChatService {
   rpc SendMessage(ChatMessage) returns (ChatResponse);
+  rpc Register(RegisterRequest)                 returns (RegisterResponse);
+  rpc Login(LoginRequest)                       returns (LoginResponse);
+  rpc Logout(LogoutRequest)                     returns (LogoutResponse);
+  rpc ValidateSession(ValidateSessionRequest)   returns (ValidateSessionResponse);
   rpc SaveConversation(SaveConversationRequest) returns (SaveConversationResponse);
 
   rpc SaveNote(SaveNoteRequest)         returns (SaveNoteResponse);

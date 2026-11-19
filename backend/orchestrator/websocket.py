@@ -5,15 +5,15 @@ import json
 import logging
 
 import grpc
-from google.genai import errors
 from fastapi import WebSocket, WebSocketDisconnect
+from google.genai import errors
 
+from backend.orchestrator.gemini_service import stream_chat_response
 from backend.orchestrator.intent_handler import (
     classify_message,
     execute_action,
     save_conversation,
 )
-from backend.orchestrator.gemini_service import stream_chat_response
 
 log = logging.getLogger("orchestrator")
 

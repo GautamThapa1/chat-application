@@ -42,6 +42,26 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.ChatMessage.SerializeToString,
                 response_deserializer=chat__pb2.ChatResponse.FromString,
                 _registered_method=True)
+        self.Register = channel.unary_unary(
+                '/chat.ChatService/Register',
+                request_serializer=chat__pb2.RegisterRequest.SerializeToString,
+                response_deserializer=chat__pb2.RegisterResponse.FromString,
+                _registered_method=True)
+        self.Login = channel.unary_unary(
+                '/chat.ChatService/Login',
+                request_serializer=chat__pb2.LoginRequest.SerializeToString,
+                response_deserializer=chat__pb2.LoginResponse.FromString,
+                _registered_method=True)
+        self.Logout = channel.unary_unary(
+                '/chat.ChatService/Logout',
+                request_serializer=chat__pb2.LogoutRequest.SerializeToString,
+                response_deserializer=chat__pb2.LogoutResponse.FromString,
+                _registered_method=True)
+        self.ValidateSession = channel.unary_unary(
+                '/chat.ChatService/ValidateSession',
+                request_serializer=chat__pb2.ValidateSessionRequest.SerializeToString,
+                response_deserializer=chat__pb2.ValidateSessionResponse.FromString,
+                _registered_method=True)
         self.SaveConversation = channel.unary_unary(
                 '/chat.ChatService/SaveConversation',
                 request_serializer=chat__pb2.SaveConversationRequest.SerializeToString,
@@ -81,6 +101,30 @@ class ChatServiceServicer:
     """
 
     def SendMessage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Register(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Login(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Logout(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ValidateSession(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -129,6 +173,26 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     servicer.SendMessage,
                     request_deserializer=chat__pb2.ChatMessage.FromString,
                     response_serializer=chat__pb2.ChatResponse.SerializeToString,
+            ),
+            'Register': grpc.unary_unary_rpc_method_handler(
+                    servicer.Register,
+                    request_deserializer=chat__pb2.RegisterRequest.FromString,
+                    response_serializer=chat__pb2.RegisterResponse.SerializeToString,
+            ),
+            'Login': grpc.unary_unary_rpc_method_handler(
+                    servicer.Login,
+                    request_deserializer=chat__pb2.LoginRequest.FromString,
+                    response_serializer=chat__pb2.LoginResponse.SerializeToString,
+            ),
+            'Logout': grpc.unary_unary_rpc_method_handler(
+                    servicer.Logout,
+                    request_deserializer=chat__pb2.LogoutRequest.FromString,
+                    response_serializer=chat__pb2.LogoutResponse.SerializeToString,
+            ),
+            'ValidateSession': grpc.unary_unary_rpc_method_handler(
+                    servicer.ValidateSession,
+                    request_deserializer=chat__pb2.ValidateSessionRequest.FromString,
+                    response_serializer=chat__pb2.ValidateSessionResponse.SerializeToString,
             ),
             'SaveConversation': grpc.unary_unary_rpc_method_handler(
                     servicer.SaveConversation,
@@ -191,6 +255,114 @@ class ChatService:
             '/chat.ChatService/SendMessage',
             chat__pb2.ChatMessage.SerializeToString,
             chat__pb2.ChatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Register(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/Register',
+            chat__pb2.RegisterRequest.SerializeToString,
+            chat__pb2.RegisterResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Login(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/Login',
+            chat__pb2.LoginRequest.SerializeToString,
+            chat__pb2.LoginResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Logout(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/Logout',
+            chat__pb2.LogoutRequest.SerializeToString,
+            chat__pb2.LogoutResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ValidateSession(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/ValidateSession',
+            chat__pb2.ValidateSessionRequest.SerializeToString,
+            chat__pb2.ValidateSessionResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -5,11 +5,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import grpc
-from google import genai
-from google.genai import types
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
-from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 from backend.generated import chat_pb2_grpc
 from backend.orchestrator.websocket import websocket_endpoint

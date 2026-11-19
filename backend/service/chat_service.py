@@ -16,6 +16,37 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         db.save_message("assistant", reply)
         return chat_pb2.ChatResponse(role="assistant", content=reply)
 
+    # ---------------------------------------------------------------- #
+    # Auth
+    # ---------------------------------------------------------------- #
+    def Register(self, request, context):
+        try:
+            user_id = db.register_user(request.username, request.password)
+        except db.UsernameTaken as exc:  # must come first: it is a ValueError too
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.RegisterResponse(user_id=user_id)
+
+    def Login(self, request, context):
+        user_id = db.authenticate(request.username, request.password)
+        if user_id is None:
+            context.abort(
+                grpc.StatusCode.UNAUTHENTICATED, "Invalid username or password."
+            )
+        token = db.create_session(user_id)
+        return chat_pb2.LoginResponse(session_token=token, user_id=user_id)
+
+    def Logout(self, request, context):
+        db.delete_session(request.session_token)
+        return chat_pb2.LogoutResponse()
+
+    def ValidateSession(self, request, context):
+        user_id = db.get_session_user(request.session_token)
+        return chat_pb2.ValidateSessionResponse(
+            valid=user_id is not None, user_id=user_id or 0
+        )
+
     def SaveConversation(self, request, context):
         db.save_conversation(request.user_content, request.assistant_content)
         return chat_pb2.SaveConversationResponse(success=True)
