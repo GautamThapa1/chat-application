@@ -1,4 +1,4 @@
-.PHONY: proto back service
+.PHONY: proto back service test
 
 proto:
 	uv run python -m grpc_tools.protoc -I backend/proto \
@@ -13,3 +13,6 @@ back:
 
 service:
 	uv run python -m backend.service.main
+
+test:
+	uv run pytest
