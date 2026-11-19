@@ -123,6 +123,12 @@ async def test_websocket_route_passes_dependencies(monkeypatch):
         endpoint,
     )
 
+    monkeypatch.setattr(
+        main,
+        "authenticate_websocket",
+        AsyncMock(return_value=1),  # pretend the handshake is authenticated
+    )
+
     # Act
     await main.ws_chat(fake_websocket)
 
@@ -133,6 +139,24 @@ async def test_websocket_route_passes_dependencies(monkeypatch):
         fake_gemini_client,
         fake_model,
     )
+
+@pytest.mark.asyncio
+async def test_websocket_route_rejects_unauthenticated(monkeypatch):
+    # Arrange
+    fake_websocket = SimpleNamespace(close=AsyncMock())
+    endpoint = AsyncMock()
+
+    monkeypatch.setattr(main, "websocket_endpoint", endpoint)
+    monkeypatch.setattr(
+        main, "authenticate_websocket", AsyncMock(return_value=None)
+    )
+
+    # Act
+    await main.ws_chat(fake_websocket)
+
+    # Assert
+    fake_websocket.close.assert_awaited_once_with(code=1008)
+    endpoint.assert_not_awaited()
 
 
 def test_websocket_route_is_registered():
