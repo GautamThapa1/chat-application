@@ -226,10 +226,50 @@
       }
 
       .empty-state {
+        width: min(100%, 620px);
         margin: auto;
+        color: #718084;
+        text-align: center;
+      }
+
+      .empty-state-title {
+        margin: 0 0 14px;
         color: #98a4a6;
         font-size: 14px;
-        text-align: center;
+      }
+
+      .prompt-hints {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+        gap: 8px;
+      }
+
+      .hint-button {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        min-width: 0;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: #354548;
+        font-size: 12px;
+        font-weight: 500;
+        text-align: left;
+      }
+
+      .hint-button:hover {
+        border-color: #b7d7d2;
+        background: #f7fbfa;
+      }
+
+      .hint-operation {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
       }
 
       .msg {
@@ -498,7 +538,35 @@
         </header>
 
         <section id="log" aria-label="Conversation" aria-live="polite">
-          <p id="empty-state" class="empty-state">Send a message to start the conversation.</p>
+          <div id="empty-state" class="empty-state">
+            <p class="empty-state-title">Try one of these messages:</p>
+            <div class="prompt-hints">
+              <button class="hint-button" type="button" data-prompt="Remember that my backend uses FastAPI">
+                <span>Remember that my backend uses FastAPI</span>
+                <span class="hint-operation">Save note</span>
+              </button>
+              <button class="hint-button" type="button" data-prompt="Show my notes">
+                <span>Show my notes</span>
+                <span class="hint-operation">Retrieve notes</span>
+              </button>
+              <button class="hint-button" type="button" data-prompt="Create a task to finish gRPC">
+                <span>Create a task to finish gRPC</span>
+                <span class="hint-operation">Create task</span>
+              </button>
+              <button class="hint-button" type="button" data-prompt="Show my tasks">
+                <span>Show my tasks</span>
+                <span class="hint-operation">List tasks</span>
+              </button>
+              <button class="hint-button" type="button" data-prompt="Mark task 1 completed">
+                <span>Mark task 1 completed</span>
+                <span class="hint-operation">Complete task</span>
+              </button>
+              <button class="hint-button" type="button" data-prompt="Hello">
+                <span>Hello</span>
+                <span class="hint-operation">General chat</span>
+              </button>
+            </div>
+          </div>
         </section>
 
         <form id="form" class="composer">

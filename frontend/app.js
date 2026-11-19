@@ -31,6 +31,15 @@ let activeConversationId = null;
 let conversationLoadGeneration = 0;
 let userStateGeneration = 0;
 
+const promptHints = [
+  ["Remember that my backend uses FastAPI", "Save note"],
+  ["Show my notes", "Retrieve notes"],
+  ["Create a task to finish gRPC", "Create task"],
+  ["Show my tasks", "List tasks"],
+  ["Mark task 1 completed", "Complete task"],
+  ["Hello", "General chat"],
+];
+
 async function api(path, method = "GET", body) {
   const options = { method, headers: {} };
   if (body !== undefined) {
@@ -525,9 +534,33 @@ function removePendingBubbles() {
 }
 
 function createEmptyState() {
-  const emptyState = document.createElement("p");
+  const emptyState = document.createElement("div");
   emptyState.className = "empty-state";
-  emptyState.textContent = "Send a message to start the conversation.";
+  const title = document.createElement("p");
+  title.className = "empty-state-title";
+  title.textContent = "Try one of these messages:";
+
+  const hints = document.createElement("div");
+  hints.className = "prompt-hints";
+  for (const [prompt, operation] of promptHints) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hint-button";
+
+    const promptText = document.createElement("span");
+    promptText.textContent = prompt;
+    const operationText = document.createElement("span");
+    operationText.className = "hint-operation";
+    operationText.textContent = operation;
+
+    button.append(promptText, operationText);
+    button.addEventListener("click", () => {
+      inputEl.value = prompt;
+      inputEl.focus();
+    });
+    hints.appendChild(button);
+  }
+  emptyState.append(title, hints);
   return emptyState;
 }
 
