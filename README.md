@@ -2,6 +2,8 @@
 
 A modern AI-powered chat application built with **Python, FastAPI, and Google Gemini**. Luma combines real-time AI conversations with persistent chat history, note management, and task management.
 
+[GitHub repository](https://github.com/GautamThapa1/chat-application)
+
 ## ✨ Features
 
 - **AI Conversations** — Stream real-time responses using Google Gemini.
@@ -46,8 +48,8 @@ uv.lock
 **1. Clone the repository**
 
 ```bash
-git clone <repository-url>
-cd <project-directory>
+git clone https://github.com/GautamThapa1/chat-application.git
+cd chat-application
 ```
 
 **2. Install dependencies**
