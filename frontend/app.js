@@ -23,6 +23,25 @@ const authSwitchEl = document.getElementById("auth-switch");
 const authSwitchTextEl = document.getElementById("auth-switch-text");
 const HEARTBEAT_INTERVAL_MS = 25000; // how often we ask "are you alive?"
 const PONG_TIMEOUT_MS = 10000; // how long we wait for the answer
+let reconnectAttempt = 0; // consecutive failed reconnects; 0 when connected
+
+// Exponential backoff with jitter: ~1s, 2s, 4s ... capped at 30s. The random
+// half stops every client retrying at the same instant after a server restart.
+function reconnectDelayMs(attempt) {
+  const ceiling = Math.min(30000, 1000 * 2 ** attempt);
+  return ceiling / 2 + Math.random() * (ceiling / 2);
+}
+
+function scheduleReconnect(deadSocket, conversationId) {
+  const delay = reconnectDelayMs(reconnectAttempt++);
+  setConnection(`Reconnecting in ${Math.ceil(delay / 1000)}s...`, "error");
+  setTimeout(() => {
+    // Skip if the user moved on (switched chat, logged out) in the meantime.
+    if (ws !== deadSocket || activeConversationId !== conversationId) return;
+    connectWebSocket(conversationId);
+  }, delay);
+}
+
 const pendingBubbles = new Map();
 let nextRequestId = 0;
 let ws = null;
@@ -72,6 +91,7 @@ function clearUserState() {
   userStateGeneration += 1;
   const socket = ws;
   ws = null;
+  reconnectAttempt = 0;
   socket?.close();
   conversationLoadGeneration += 1;
   conversations = [];
@@ -287,6 +307,7 @@ async function selectConversation(conversationId) {
   const userGeneration = userStateGeneration;
   const socket = ws;
   ws = null;
+  reconnectAttempt = 0;
   socket?.close();
   activeConversationId = conversationId;
   const generation = ++conversationLoadGeneration;
@@ -388,42 +409,57 @@ function connectWebSocket(conversationId) {
       if (pendingBubbles.size > 0) return;
       socket.send(JSON.stringify({ type: "ping" }));
       pongTimer = setTimeout(() => {
-        if (pendingBubbles.size === 0) socket.close(); // no pong: treat as dead
+        if (pendingBubbles.size === 0) {
+          socket.close();
+          handleClose(); // don't wait: a dead socket may never fire onclose
+        }
       }, PONG_TIMEOUT_MS);
     }, HEARTBEAT_INTERVAL_MS);
   }
 
   socket.onopen = () => {
     if (socket !== ws || activeConversationId !== conversationId) return;
+    reconnectAttempt = 0;
     setConnection("Connected", "connected");
     startHeartbeat();
     addLine("system", "connected");
   };
 
-  socket.onclose = async () => {
+  let handled = false; // handleClose may be reached twice; run it once
+
+  async function handleClose() {
+    if (handled) return;
+    handled = true;
     stopHeartbeat();
+    // Intentional closes set ws = null first, so they stop here.
     if (socket !== ws || activeConversationId !== conversationId) return;
-    setConnection("Disconnected", "error");
-    removePendingBubbles();
-    addLine("system", "disconnected");
+
+    if (pendingBubbles.size > 0) {
+      removePendingBubbles();
+      addLine(
+        "system",
+        "Connection lost before the reply finished. Please resend your message.",
+      );
+    }
 
     try {
       const me = await api("/api/me");
       if (me.status === 401) {
         showAuth("Your session has ended. Please log in again.");
+        return;
       }
     } catch {
-      setConnection("Disconnected: server unavailable", "error");
+      // Server unreachable: fall through and keep retrying.
     }
-  };
-
-  socket.onerror = (err) => {
-    stopHeartbeat();
     if (socket !== ws || activeConversationId !== conversationId) return;
-    setConnection("Connection error", "error");
-    removePendingBubbles();
-    addLine("system", `error: ${err.message || "websocket error"}`);
-  };
+    scheduleReconnect(socket, conversationId);
+  }
+
+  socket.onclose = handleClose;
+
+  // The browser always fires "close" right after "error", so handleClose
+  // covers the UI; here we only make sure the timers stop.
+  socket.onerror = stopHeartbeat;
 
   socket.onmessage = (event) => {
     if (socket !== ws || activeConversationId !== conversationId) return;

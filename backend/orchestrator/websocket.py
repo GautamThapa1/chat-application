@@ -173,3 +173,4 @@ async def websocket_endpoint(
 
     except WebSocketDisconnect:
         log.info("WebSocket disconnected")
+
