@@ -51,23 +51,64 @@ def test_tasks_are_isolated_and_updates_check_owner(owners_db):
     assert db.get_tasks(user_a)[0]["completed"] == 1
 
 
+
 def test_conversations_messages_and_deletion_are_owner_scoped(owners_db):
     user_a, user_b = owners_db
+
     conversation_a = db.create_conversation(user_a)
     conversation_a2 = db.create_conversation(user_a)
+    conversation_a3 = db.create_conversation(user_a)
     conversation_b = db.create_conversation(user_b)
+
     db.save_conversation(user_a, conversation_a["id"], "hello A", "reply A")
     db.save_conversation(user_a, conversation_a2["id"], "hello A2", "reply A2")
+    db.save_conversation(user_a, conversation_a3["id"], "hello A3", "reply A3")
     db.save_conversation(user_b, conversation_b["id"], "hello B", "reply B")
 
-    assert [row["id"] for row in db.list_conversations(user_a)] == [
+    # First page: newest 2 conversations
+    page_1, total_a = db.list_conversations(
+        user_a, limit=2, offset=0
+    )
+
+    assert [row["id"] for row in page_1] == [
+        conversation_a3["id"],
         conversation_a2["id"],
-        conversation_a["id"],
     ]
-    assert db.list_conversations(user_b)[0]["id"] == conversation_b["id"]
+    assert total_a == 3
+
+    # Second page: remaining conversation
+    page_2, total_a = db.list_conversations(
+        user_a, limit=2, offset=2
+    )
+
+    assert [row["id"] for row in page_2] == [
+        conversation_a["id"]
+    ]
+    assert total_a == 3
+
+    # User B must only see their own conversations
+    page_b, total_b = db.list_conversations(
+        user_b, limit=20, offset=0
+    )
+
+    assert [row["id"] for row in page_b] == [
+        conversation_b["id"]
+    ]
+    assert total_b == 1
+
+    # Offset beyond available records returns an empty page
+    empty_page, total = db.list_conversations(
+        user_a, limit=2, offset=10
+    )
+
+    assert empty_page == []
+    assert total == 3
+
+    # Existing ownership checks
     assert db.get_conversation(user_b, conversation_a["id"]) is None
     assert db.get_conversation_messages(user_b, conversation_a["id"]) == []
     assert db.delete_conversation(user_b, conversation_a["id"]) is False
+
     assert len(db.get_conversation_messages(user_a, conversation_a["id"])) == 2
     assert db.delete_conversation(user_a, conversation_a["id"]) is True
     assert db.get_conversation_messages(user_a, conversation_a["id"]) == []
@@ -154,3 +195,20 @@ def test_migration_refuses_to_overwrite_an_existing_legacy_table(tmp_path, monke
         ).fetchone()
     finally:
         conn.close()
+
+
+def test_list_conversations_rejects_invalid_limit(owners_db):
+    user_a, _ = owners_db
+
+    with pytest.raises(ValueError):
+        db.list_conversations(user_a, limit=0)
+
+    with pytest.raises(ValueError):
+        db.list_conversations(user_a, limit=101)
+
+
+def test_list_conversations_rejects_negative_offset(owners_db):
+    user_a, _ = owners_db
+
+    with pytest.raises(ValueError):
+        db.list_conversations(user_a, limit=20, offset=-1)
