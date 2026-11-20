@@ -78,6 +78,7 @@ async def register(body: RegisterBody, request: Request):
     return {"user_id": result.user_id}
 
 @router.post("/login")
+@limiter.limit("10 per 15 minutes")  # little more because legit user may attemp to sign in more
 async def login(body: LoginBody, request: Request, response: Response):
     try:
         result = await request.app.state.grpc_stub.Login(

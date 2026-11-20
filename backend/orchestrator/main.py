@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 from slowapi import _rate_limit_exceeded_handler
+from slowapi.middleware import SlowAPIMiddleware
 from slowapi.errors import RateLimitExceeded
 
 from backend.generated import chat_pb2_grpc
@@ -61,6 +62,7 @@ app.add_exception_handler(
     RateLimitExceeded,
     _rate_limit_exceeded_handler
 )
+app.add_middleware(SlowAPIMiddleware)
 
 @app.websocket("/ws") # frontend connects here
 async def ws_chat(ws: WebSocket):
