@@ -155,16 +155,43 @@ def create_conversation(user_id: int, title: str = "New chat") -> dict:
         conn.close()
 
 
-def list_conversations(user_id: int) -> list[dict]:
+def list_conversations(
+    user_id: int,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+
+    if not 1 <= limit <= 100:
+        raise ValueError("Limit must be between 1 and 100.")
+
+    if offset < 0:
+        raise ValueError("Offset cannot be negative.")
+
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT conversation_id AS id, user_id, title, created_at, updated_at "
-            "FROM conversations WHERE user_id = ? "
-            "ORDER BY updated_at DESC, conversation_id DESC",
-            (user_id,),
+            """
+            SELECT conversation_id AS id, user_id, title,
+                   created_at, updated_at
+            FROM conversations
+            WHERE user_id = ?
+            ORDER BY updated_at DESC, conversation_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
         ).fetchall()
-        return [dict(row) for row in rows]
+
+        total_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM conversations
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()[0]
+
+        return [dict(row) for row in rows], total_count
+
     finally:
         conn.close()
 

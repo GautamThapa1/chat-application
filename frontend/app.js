@@ -11,6 +11,9 @@ const logoutButtonEl = document.getElementById("logout");
 const newChatButtonEl = document.getElementById("new-chat");
 const stopButtonEl = document.getElementById("stop");
 const conversationsEl = document.getElementById("conversations");
+const loadMoreConversationsEl = document.getElementById(
+  "load-more-conversations",
+);
 
 const chatEl = document.getElementById("chat");
 const authEl = document.getElementById("auth");
@@ -24,6 +27,7 @@ const authSwitchEl = document.getElementById("auth-switch");
 const authSwitchTextEl = document.getElementById("auth-switch-text");
 const HEARTBEAT_INTERVAL_MS = 25000; // how often we ask "are you alive?"
 const PONG_TIMEOUT_MS = 10000; // how long we wait for the answer
+const CONVERSATION_PAGE_SIZE = 20;
 let reconnectAttempt = 0; // consecutive failed reconnects; 0 when connected
 
 // Exponential backoff with jitter: ~1s, 2s, 4s ... capped at 30s. The random
@@ -54,6 +58,9 @@ let nextRequestId = 0;
 let ws = null;
 let authMode = "login";
 let conversations = [];
+let conversationOffset = 0;
+let conversationTotalCount = 0;
+let conversationsLoading = false;
 let activeConversationId = null;
 let conversationLoadGeneration = 0;
 let userStateGeneration = 0;
@@ -102,6 +109,9 @@ function clearUserState() {
   socket?.close();
   conversationLoadGeneration += 1;
   conversations = [];
+  conversationOffset = 0;
+  conversationTotalCount = 0;
+  conversationsLoading = false;
   activeConversationId = null;
   renderConversations();
   resetChat();
@@ -216,7 +226,9 @@ async function loadConversations() {
   clearUserState();
   const generation = userStateGeneration;
   try {
-    const result = await api("/api/conversations");
+    const result = await api(
+      `/api/conversations?limit=${CONVERSATION_PAGE_SIZE}&offset=0`,
+    );
     if (generation !== userStateGeneration) return;
     if (!result.ok) {
       if (result.status === 401) {
@@ -228,7 +240,10 @@ async function loadConversations() {
       return;
     }
 
-    conversations = result.data.conversations;
+    appendConversations(result.data.conversations);
+    conversationOffset =
+      result.data.pagination.offset + result.data.conversations.length;
+    conversationTotalCount = result.data.pagination.total_count;
     renderConversations();
     setConnection(
       conversations.length ? "Select a chat" : "Start a new chat",
@@ -243,7 +258,68 @@ async function loadConversations() {
   }
 }
 
+async function loadMoreConversations() {
+  if (
+    conversationsLoading
+    || conversationOffset >= conversationTotalCount
+  ) return;
+
+  const generation = userStateGeneration;
+  const offset = conversationOffset;
+  conversationsLoading = true;
+  updateLoadMoreConversationsButton();
+
+  try {
+    const result = await api(
+      `/api/conversations?limit=${CONVERSATION_PAGE_SIZE}&offset=${offset}`,
+    );
+    if (generation !== userStateGeneration) return;
+    if (!result.ok) {
+      if (result.status === 401) {
+        showAuth("Your session has ended. Please log in again.");
+      } else {
+        addLine("system", errorMessage(result.data));
+        setConnection("Could not load chats", "error");
+      }
+      return;
+    }
+
+    appendConversations(result.data.conversations);
+    conversationOffset =
+      result.data.pagination.offset + result.data.conversations.length;
+    conversationTotalCount = result.data.pagination.total_count;
+    renderConversations();
+  } catch {
+    if (generation === userStateGeneration) {
+      addLine("system", "Could not reach the server to load chats.");
+      setConnection("Could not load chats", "error");
+    }
+  } finally {
+    if (generation === userStateGeneration) {
+      conversationsLoading = false;
+      updateLoadMoreConversationsButton();
+    }
+  }
+}
+
+function appendConversations(newConversations) {
+  const conversationIds = new Set(
+    conversations.map((conversation) => conversation.conversation_id),
+  );
+  for (const conversation of newConversations) {
+    if (conversationIds.has(conversation.conversation_id)) continue;
+    conversations.push(conversation);
+    conversationIds.add(conversation.conversation_id);
+  }
+}
+
+function updateLoadMoreConversationsButton() {
+  loadMoreConversationsEl.hidden = conversationOffset >= conversationTotalCount;
+  loadMoreConversationsEl.disabled = conversationsLoading;
+}
+
 function renderConversations() {
+  updateLoadMoreConversationsButton();
   conversationsEl.replaceChildren();
   if (!conversations.length) {
     const empty = document.createElement("p");
@@ -285,6 +361,10 @@ newChatButtonEl.addEventListener("click", () => {
   void createConversation();
 });
 
+loadMoreConversationsEl.addEventListener("click", () => {
+  void loadMoreConversations();
+});
+
 async function createConversation() {
   const generation = userStateGeneration;
   newChatButtonEl.disabled = true;
@@ -299,9 +379,17 @@ async function createConversation() {
       }
       return;
     }
-    conversations = [result.data.conversation, ...conversations];
+    const newConversation = result.data.conversation;
+    conversations = [
+      newConversation,
+      ...conversations.filter(
+        (item) => item.conversation_id !== newConversation.conversation_id,
+      ),
+    ];
+    if (conversationOffset > 0) conversationOffset += 1;
+    conversationTotalCount += 1;
     renderConversations();
-    await selectConversation(result.data.conversation.conversation_id);
+    await selectConversation(newConversation.conversation_id);
   } catch {
     if (generation === userStateGeneration) {
       addLine("system", "Could not reach the server to create a chat.");
@@ -372,9 +460,16 @@ async function deleteConversation(conversationId) {
       return;
     }
 
+    const wasLoaded = conversations.some(
+      (item) => item.conversation_id === conversationId,
+    );
     conversations = conversations.filter(
       (item) => item.conversation_id !== conversationId,
     );
+    if (wasLoaded) {
+      if (conversationOffset > 0) conversationOffset -= 1;
+      conversationTotalCount = Math.max(0, conversationTotalCount - 1);
+    }
     if (activeConversationId === conversationId) {
       const socket = ws;
       ws = null;

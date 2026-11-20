@@ -76,13 +76,31 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             conversation=_conversation_message(conversation)
         )
 
+
     def ListConversations(self, request, context):
+        user_id = current_user_id()
+
+        # Use defaults when the caller omits pagination values.
+        limit = request.limit or 20
+        offset = request.offset
+
+        try:
+            conversations, total_count = db.list_conversations(
+                user_id,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+
         return chat_pb2.ListConversationsResponse(
             conversations=[
                 _conversation_message(row)
-                for row in db.list_conversations(current_user_id())
-            ]
+                for row in conversations
+            ],
+            total_count=total_count,
         )
+
 
     def GetConversation(self, request, context):
         user_id = current_user_id()

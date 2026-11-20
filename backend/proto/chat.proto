@@ -51,10 +51,14 @@ message CreateConversationResponse {
   Conversation conversation = 1;
 }
 
-message ListConversationsRequest {}
+message ListConversationsRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+}
 
 message ListConversationsResponse {
   repeated Conversation conversations = 1;
+  int32 total_count = 2;
 }
 
 message GetConversationRequest {

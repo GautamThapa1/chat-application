@@ -1,7 +1,7 @@
 """HTTP endpoints for the signed-in user's conversations."""
 
 import grpc
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from backend.generated import chat_pb2
@@ -45,12 +45,33 @@ def _conversation_json(conversation) -> dict:
     }
 
 
+
 @router.get("")
-async def list_conversations(request: Request):
+async def list_conversations(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
     result = await _call(
-        request, "ListConversations", chat_pb2.ListConversationsRequest()
+        request,
+        "ListConversations",
+        chat_pb2.ListConversationsRequest(
+            limit=limit,
+            offset=offset,
+        ),
     )
-    return {"conversations": [_conversation_json(row) for row in result.conversations]}
+
+    return {
+        "conversations": [
+            _conversation_json(row)
+            for row in result.conversations
+        ],
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "total_count": result.total_count,
+        },
+    }
 
 
 @router.post("", status_code=201)
