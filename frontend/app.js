@@ -21,7 +21,8 @@ const authErrorEl = document.getElementById("auth-error");
 const authSubmitEl = document.getElementById("auth-submit");
 const authSwitchEl = document.getElementById("auth-switch");
 const authSwitchTextEl = document.getElementById("auth-switch-text");
-
+const HEARTBEAT_INTERVAL_MS = 25000; // how often we ask "are you alive?"
+const PONG_TIMEOUT_MS = 10000; // how long we wait for the answer
 const pendingBubbles = new Map();
 let nextRequestId = 0;
 let ws = null;
@@ -371,13 +372,36 @@ function connectWebSocket(conversationId) {
   ws = socket;
   setConnection("Connecting", "");
 
+  let pingTimer = null;
+  let pongTimer = null;
+
+  function stopHeartbeat() {
+    clearInterval(pingTimer);
+    clearTimeout(pongTimer);
+  }
+
+  function startHeartbeat() {
+    pingTimer = setInterval(() => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      // While a reply is being generated the server is busy, and its chunks
+      // already prove it is alive, so only ping when idle.
+      if (pendingBubbles.size > 0) return;
+      socket.send(JSON.stringify({ type: "ping" }));
+      pongTimer = setTimeout(() => {
+        if (pendingBubbles.size === 0) socket.close(); // no pong: treat as dead
+      }, PONG_TIMEOUT_MS);
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
   socket.onopen = () => {
     if (socket !== ws || activeConversationId !== conversationId) return;
     setConnection("Connected", "connected");
+    startHeartbeat();
     addLine("system", "connected");
   };
 
   socket.onclose = async () => {
+    stopHeartbeat();
     if (socket !== ws || activeConversationId !== conversationId) return;
     setConnection("Disconnected", "error");
     removePendingBubbles();
@@ -394,6 +418,7 @@ function connectWebSocket(conversationId) {
   };
 
   socket.onerror = (err) => {
+    stopHeartbeat();
     if (socket !== ws || activeConversationId !== conversationId) return;
     setConnection("Connection error", "error");
     removePendingBubbles();
@@ -407,6 +432,11 @@ function connectWebSocket(conversationId) {
       msg = JSON.parse(event.data);
     } catch {
       addLine("system", `raw: ${event.data}`);
+      return;
+    }
+
+    if (msg.type === "pong") {
+      clearTimeout(pongTimer); // the server answered in time
       return;
     }
 
