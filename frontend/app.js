@@ -37,13 +37,13 @@ function reconnectDelayMs(attempt) {
   return ceiling / 2 + Math.random() * (ceiling / 2);
 }
 
-function scheduleReconnect(deadSocket, conversationId) {
+function scheduleReconnect(deadSocket, conversationId, initialPrompt = "") {
   const delay = reconnectDelayMs(reconnectAttempt++);
   setConnection(`Reconnecting in ${Math.ceil(delay / 1000)}s...`, "error");
   setTimeout(() => {
     // Skip if the user moved on (switched chat, logged out) in the meantime.
     if (ws !== deadSocket || activeConversationId !== conversationId) return;
-    connectWebSocket(conversationId);
+    connectWebSocket(conversationId, initialPrompt);
   }, delay);
 }
 
@@ -64,6 +64,7 @@ let conversationsLoading = false;
 let activeConversationId = null;
 let conversationLoadGeneration = 0;
 let userStateGeneration = 0;
+let conversationCreationInProgress = false;
 
 const promptHints = [
   ["Remember that my backend uses FastAPI", "Save note"],
@@ -131,8 +132,9 @@ function showChat() {
   inputEl.focus();
 }
 
-function resetChat() {
-  logEl.replaceChildren(createEmptyState());
+function resetChat(showHints = true) {
+  logEl.replaceChildren();
+  if (showHints) logEl.appendChild(createEmptyState());
   pendingBubbles.clear();
   syncBusyState();
 }
@@ -365,8 +367,11 @@ loadMoreConversationsEl.addEventListener("click", () => {
   void loadMoreConversations();
 });
 
-async function createConversation() {
+async function createConversation(initialPrompt = "") {
+  if (conversationCreationInProgress) return;
+
   const generation = userStateGeneration;
+  conversationCreationInProgress = true;
   newChatButtonEl.disabled = true;
   try {
     const result = await api("/api/conversations", "POST", { title: "New chat" });
@@ -386,20 +391,21 @@ async function createConversation() {
         (item) => item.conversation_id !== newConversation.conversation_id,
       ),
     ];
-    if (conversationOffset > 0) conversationOffset += 1;
+    conversationOffset += 1;
     conversationTotalCount += 1;
     renderConversations();
-    await selectConversation(newConversation.conversation_id);
+    await selectConversation(newConversation.conversation_id, initialPrompt);
   } catch {
     if (generation === userStateGeneration) {
       addLine("system", "Could not reach the server to create a chat.");
     }
   } finally {
+    conversationCreationInProgress = false;
     newChatButtonEl.disabled = false;
   }
 }
 
-async function selectConversation(conversationId) {
+async function selectConversation(conversationId, initialPrompt = "") {
   const userGeneration = userStateGeneration;
   const socket = ws;
   ws = null;
@@ -407,7 +413,7 @@ async function selectConversation(conversationId) {
   socket?.close();
   activeConversationId = conversationId;
   const generation = ++conversationLoadGeneration;
-  resetChat();
+  resetChat(false);
   renderConversations();
   setConnection("Loading chat", "");
 
@@ -431,10 +437,10 @@ async function selectConversation(conversationId) {
       for (const message of result.data.messages) {
         addLine(message.role, message.content);
       }
-    } else {
+    } else if (!initialPrompt) {
       resetChat();
     }
-    connectWebSocket(conversationId);
+    connectWebSocket(conversationId, initialPrompt);
   } catch {
     if (
       userGeneration === userStateGeneration
@@ -490,9 +496,10 @@ async function deleteConversation(conversationId) {
   }
 }
 
-function connectWebSocket(conversationId) {
+function connectWebSocket(conversationId, initialPrompt = "") {
   if (activeConversationId !== conversationId) return;
   const socket = new WebSocket(WS_URL);
+  let promptToSend = initialPrompt;
   ws = socket;
   setConnection("Connecting", "");
 
@@ -521,6 +528,12 @@ function connectWebSocket(conversationId) {
     setConnection("Connected", "connected");
     startHeartbeat();
     addLine("system", "connected");
+    if (
+      promptToSend
+      && sendMessage(promptToSend, inputEl.value.trim() === promptToSend)
+    ) {
+      promptToSend = "";
+    }
   };
 
   let handled = false; // handleClose may be reached twice; run it once
@@ -550,7 +563,7 @@ function connectWebSocket(conversationId) {
       // Server unreachable: fall through and keep retrying.
     }
     if (socket !== ws || activeConversationId !== conversationId) return;
-    scheduleReconnect(socket, conversationId);
+    scheduleReconnect(socket, conversationId, promptToSend);
   }
 
   socket.onclose = handleClose;
@@ -641,20 +654,24 @@ clearButtonEl.addEventListener("click", () => {
 
 formEl.addEventListener("submit", (e) => {
   e.preventDefault();
-  const text = inputEl.value.trim();
-  if (!text) return;
+  sendMessage(inputEl.value, true);
+});
+
+function sendMessage(text, clearInput = false) {
+  text = text.trim();
+  if (!text) return false;
 
   if (!activeConversationId) {
     addLine("system", "Create or select a chat before sending a message.");
-    return;
+    return false;
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     addLine("system", "Not connected — try again in a moment.");
-    return;
+    return false;
   }
   if (pendingBubbles.size > 0) {
     addLine("system", "Wait for the reply to finish, or press Stop.");
-    return;
+    return false;
   }
 
   const requestId = String(++nextRequestId);
@@ -667,8 +684,9 @@ formEl.addEventListener("submit", (e) => {
   addLine("user", text);
   pendingBubbles.set(requestId, createThinkingBubble());
   syncBusyState();
-  inputEl.value = "";
-});
+  if (clearInput) inputEl.value = "";
+  return true;
+}
 
 stopButtonEl.addEventListener("click", () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -743,6 +761,12 @@ function createEmptyState() {
 
     button.append(promptText, operationText);
     button.addEventListener("click", () => {
+      if (!activeConversationId) {
+        if (conversationCreationInProgress) return;
+        inputEl.value = prompt;
+        void createConversation(prompt);
+        return;
+      }
       inputEl.value = prompt;
       inputEl.focus();
     });
