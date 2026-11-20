@@ -41,6 +41,12 @@ async def websocket_endpoint(
             except json.JSONDecodeError:
                 payload = {}
 
+            # Heartbeat: the client asks "are you alive?", we answer at once.
+            # Handled before the rate limit, so a throttled user stays connected.
+            if isinstance(payload, dict) and payload.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
             # Support structured JSON and plain-text messages.
             if isinstance(payload, dict) and payload.get("type") == "message":
                 message = payload.get("content")
