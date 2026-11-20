@@ -9,6 +9,7 @@ const connectionEl = document.getElementById("connection");
 const clearButtonEl = document.getElementById("clear");
 const logoutButtonEl = document.getElementById("logout");
 const newChatButtonEl = document.getElementById("new-chat");
+const stopButtonEl = document.getElementById("stop");
 const conversationsEl = document.getElementById("conversations");
 
 const chatEl = document.getElementById("chat");
@@ -43,6 +44,12 @@ function scheduleReconnect(deadSocket, conversationId) {
 }
 
 const pendingBubbles = new Map();
+
+function syncBusyState() {
+  stopButtonEl.hidden = pendingBubbles.size === 0;
+  stopButtonEl.disabled = false;
+}
+
 let nextRequestId = 0;
 let ws = null;
 let authMode = "login";
@@ -117,6 +124,7 @@ function showChat() {
 function resetChat() {
   logEl.replaceChildren(createEmptyState());
   pendingBubbles.clear();
+  syncBusyState();
 }
 
 function setAuthMode(mode) {
@@ -404,15 +412,10 @@ function connectWebSocket(conversationId) {
   function startHeartbeat() {
     pingTimer = setInterval(() => {
       if (socket.readyState !== WebSocket.OPEN) return;
-      // While a reply is being generated the server is busy, and its chunks
-      // already prove it is alive, so only ping when idle.
-      if (pendingBubbles.size > 0) return;
       socket.send(JSON.stringify({ type: "ping" }));
       pongTimer = setTimeout(() => {
-        if (pendingBubbles.size === 0) {
-          socket.close();
-          handleClose(); // don't wait: a dead socket may never fire onclose
-        }
+        socket.close();
+        handleClose(); // don't wait: a dead socket may never fire onclose
       }, PONG_TIMEOUT_MS);
     }, HEARTBEAT_INTERVAL_MS);
   }
@@ -491,11 +494,21 @@ function connectWebSocket(conversationId) {
       }
     } else if (msg.type === "complete") {
       pendingBubbles.delete(msg.request_id);
+      syncBusyState();
       refreshConversationTitle(conversationId);
+    } else if (msg.type === "cancelled") {
+      const bubble = pendingBubbles.get(msg.request_id);
+      if (bubble && (bubble.classList.contains("thinking") || !bubble.textContent)) {
+        bubble.remove();
+      }
+      pendingBubbles.delete(msg.request_id);
+      syncBusyState();
+      addLine("system", "Stopped.");
     } else if (msg.type === "error" || msg.error) {
       const bubble = pendingBubbles.get(msg.request_id);
       bubble?.remove();
       pendingBubbles.delete(msg.request_id);
+      syncBusyState();
       addLine("system", `error: ${msg.error}`);
     } else {
       addLine(msg.role || "assistant", msg.content);
@@ -544,6 +557,10 @@ formEl.addEventListener("submit", (e) => {
     addLine("system", "Not connected — try again in a moment.");
     return;
   }
+  if (pendingBubbles.size > 0) {
+    addLine("system", "Wait for the reply to finish, or press Stop.");
+    return;
+  }
 
   const requestId = String(++nextRequestId);
   ws.send(JSON.stringify({
@@ -554,7 +571,16 @@ formEl.addEventListener("submit", (e) => {
   }));
   addLine("user", text);
   pendingBubbles.set(requestId, createThinkingBubble());
+  syncBusyState();
   inputEl.value = "";
+});
+
+stopButtonEl.addEventListener("click", () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  for (const requestId of pendingBubbles.keys()) {
+    ws.send(JSON.stringify({ type: "cancel", request_id: requestId }));
+  }
+  stopButtonEl.disabled = true;
 });
 
 function addLine(role, content) {
@@ -597,6 +623,7 @@ function removePendingBubbles() {
     bubble.remove();
   }
   pendingBubbles.clear();
+  syncBusyState();
 }
 
 function createEmptyState() {

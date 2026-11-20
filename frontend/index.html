@@ -368,6 +368,8 @@
       }
 
       button:hover { background: #116b62; }
+      .stop-button { background: #b3261e; }
+      .stop-button:hover { background: #8c1d18; }
       button:active { transform: scale(0.98); }
       button:focus-visible { outline: 3px solid #9ed5ce; outline-offset: 2px; }
 
@@ -571,6 +573,7 @@
 
         <form id="form" class="composer">
           <input id="input" autocomplete="off" placeholder="Write a message..." aria-label="Message" />
+          <button id="stop" class="stop-button" type="button" hidden>Stop</button>
           <button type="submit">Send</button>
         </form>
       </section>
