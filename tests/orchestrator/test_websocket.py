@@ -1,4 +1,5 @@
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -22,6 +23,9 @@ class FakeWebSocket:
         self.accepted = True
 
     async def receive_text(self):
+        # Like a real client, send the next frame after the server can process
+        # the previous reply running in the background.
+        await asyncio.sleep(0.01)
         if self.messages:
             return self.messages.pop(0)
 
@@ -400,3 +404,255 @@ async def test_rate_limited_user_still_gets_pongs(monkeypatch):
     )
 
     assert websocket.sent_messages[-1] == {"type": "pong"}
+
+
+class LiveWebSocket:
+    """A socket where the test decides when each frame arrives."""
+
+    def __init__(self):
+        self.incoming = asyncio.Queue()
+        self.outgoing = asyncio.Queue()
+
+    async def accept(self):
+        pass
+
+    async def receive_text(self):
+        frame = await self.incoming.get()
+        if frame is None:
+            raise WebSocketDisconnect(code=1000)
+        return frame
+
+    async def send_json(self, data):
+        await self.outgoing.put(data)
+
+    def push(self, payload):
+        self.incoming.put_nowait(json.dumps(payload))
+
+    def disconnect(self):
+        self.incoming.put_nowait(None)
+
+    async def next_event(self, wanted=None):
+        """Return the next event, or fail after one second."""
+        while True:
+            event = await asyncio.wait_for(self.outgoing.get(), timeout=1)
+            if wanted is None or event["type"] == wanted:
+                return event
+
+
+def start_endpoint(websocket, user_id=1):
+    return asyncio.create_task(
+        websocket_module.websocket_endpoint(
+            websocket, fake_stub(), object(), "test-model", user_id=user_id,
+        )
+    )
+
+
+def patch_blocking_stream(monkeypatch, *, first_chunk="Hel"):
+    """Stream one chunk, then wait until the test releases the reply."""
+    release = asyncio.Event()
+    state = {"cancelled": False}
+    save = AsyncMock()
+
+    async def stream(message, client, model, history):
+        try:
+            yield first_chunk
+            await release.wait()
+            yield "lo"
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
+
+    monkeypatch.setattr(
+        websocket_module,
+        "classify_message",
+        AsyncMock(return_value={"intent": "CHAT"}),
+    )
+    monkeypatch.setattr(websocket_module, "stream_chat_response", stream)
+    monkeypatch.setattr(websocket_module, "save_conversation", save)
+    return release, state, save
+
+
+def message_payload(request_id="r1", content="hi"):
+    return {
+        "type": "message",
+        "content": content,
+        "request_id": request_id,
+        "conversation_id": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_the_reply_and_keeps_the_partial_text(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_payload("r1"))
+    assert (await ws.next_event("chunk"))["content"] == "Hel"
+
+    ws.push({"type": "cancel", "request_id": "r1"})
+    assert await ws.next_event("cancelled") == {
+        "type": "cancelled",
+        "request_id": "r1",
+    }
+    assert state["cancelled"] is True
+    save.assert_awaited_once()
+    assert save.await_args.args[:2] == ("hi", "Hel")
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_any_text_saves_nothing(monkeypatch):
+    save = AsyncMock()
+    gate = asyncio.Event()
+
+    async def slow_classify(message, client, model):
+        await gate.wait()
+
+    monkeypatch.setattr(websocket_module, "classify_message", slow_classify)
+    monkeypatch.setattr(websocket_module, "save_conversation", save)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_payload("r1"))
+    await asyncio.sleep(0.01)
+    ws.push({"type": "cancel", "request_id": "r1"})
+
+    assert (await ws.next_event("cancelled"))["request_id"] == "r1"
+    save.assert_not_awaited()
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancel_for_an_unknown_request_is_ignored(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_payload("r1"))
+    await ws.next_event("chunk")
+
+    ws.push({"type": "cancel", "request_id": "nope"})
+    ws.push({"type": "cancel"})
+    ws.push({"type": "ping"})
+    assert (await ws.next_event())["type"] == "pong"
+    assert state["cancelled"] is False
+
+    release.set()
+    assert (await ws.next_event("complete"))["request_id"] == "r1"
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_an_action_is_not_cut_off_by_cancel(monkeypatch):
+    gate = asyncio.Event()
+    save = AsyncMock()
+
+    async def slow_action(decision, stub):
+        await gate.wait()
+        return "Task created."
+
+    monkeypatch.setattr(
+        websocket_module,
+        "classify_message",
+        AsyncMock(return_value={"intent": "CREATE_TASK"}),
+    )
+    monkeypatch.setattr(websocket_module, "execute_action", slow_action)
+    monkeypatch.setattr(websocket_module, "save_conversation", save)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_payload("r1", "create a task"))
+    await asyncio.sleep(0.01)
+    ws.push({"type": "cancel", "request_id": "r1"})
+    await asyncio.sleep(0.01)
+    gate.set()
+
+    chunk = await ws.next_event("chunk")
+    assert chunk["content"] == "Task created."
+    assert (await ws.next_event("complete"))["request_id"] == "r1"
+    save.assert_awaited_once()
+    assert ws.outgoing.empty()
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_second_message_is_refused_while_one_is_in_flight(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_payload("r1"))
+    await ws.next_event("chunk")
+
+    ws.push(message_payload("r2"))
+    refused = await ws.next_event("error")
+    assert refused["request_id"] == "r2"
+    assert "previous message" in refused["error"]
+
+    release.set()
+    assert (await ws.next_event("complete"))["request_id"] == "r1"
+    save.assert_awaited_once()
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_refused_message_does_not_use_up_the_quota(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_payload("r1"))
+    await ws.next_event("chunk")
+    for i in range(30):
+        ws.push(message_payload(f"x{i}"))
+    for _ in range(30):
+        await ws.next_event("error")
+
+    release.set()
+    await ws.next_event("complete")
+    ws.push(message_payload("r2"))
+    assert (await ws.next_event())["type"] != "error"
+
+    ws.disconnect()
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancels_the_reply_in_flight(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_payload("r1"))
+    await ws.next_event("chunk")
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+    assert state["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_pings_are_answered_while_a_reply_is_streaming(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_payload("r1"))
+    await ws.next_event("chunk")
+
+    ws.push({"type": "ping"})
+    assert await ws.next_event("pong") == {"type": "pong"}
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)

@@ -1,6 +1,8 @@
 
 """WebSocket endpoint for chat messages."""
 
+import asyncio
+import contextlib
 import json
 import logging
 
@@ -20,6 +22,101 @@ from backend.orchestrator.rate_limit import message_limit_retry_after
 log = logging.getLogger("orchestrator")
 
 
+async def _process_message(
+    websocket: WebSocket,
+    stub,
+    gemini_client,
+    model: str,
+    message: str,
+    request_id: str,
+    conversation_id: int,
+) -> None:
+    """Answer one chat message while the receive loop remains responsive."""
+    response_chunks: list[str] = []
+    try:
+        conversation = await stub.GetConversation(
+            chat_pb2.GetConversationRequest(conversation_id=conversation_id)
+        )
+        history = [
+            {"role": item.role, "content": item.content}
+            for item in conversation.messages
+        ]
+
+        decision = await classify_message(message, gemini_client, model)
+
+        if decision["intent"] == "CHAT":
+            await websocket.send_json({
+                "type": "start",
+                "request_id": request_id,
+                "role": "assistant",
+            })
+
+            async for chunk in stream_chat_response(
+                message, gemini_client, model, history,
+            ):
+                response_chunks.append(chunk)
+                await websocket.send_json({
+                    "type": "chunk",
+                    "request_id": request_id,
+                    "content": chunk,
+                })
+
+            response = "".join(response_chunks)
+            if not response:
+                raise ValueError("Gemini returned an empty response.")
+
+        else:
+            action = asyncio.ensure_future(execute_action(decision, stub))
+            try:
+                response = await asyncio.shield(action)
+            except asyncio.CancelledError:
+                response = await action
+
+            await websocket.send_json({
+                "type": "start",
+                "request_id": request_id,
+                "role": "assistant",
+            })
+            await websocket.send_json({
+                "type": "chunk",
+                "request_id": request_id,
+                "content": response,
+            })
+
+        await save_conversation(message, response, stub, conversation_id)
+        await websocket.send_json({
+            "type": "complete",
+            "request_id": request_id,
+        })
+
+    except asyncio.CancelledError:
+        partial = "".join(response_chunks)
+        if partial:
+            try:
+                await save_conversation(message, partial, stub, conversation_id)
+            except grpc.aio.AioRpcError:
+                log.exception("Could not save the partial reply")
+        with contextlib.suppress(WebSocketDisconnect, RuntimeError, OSError):
+            await websocket.send_json({
+                "type": "cancelled",
+                "request_id": request_id,
+            })
+        raise
+
+    except (errors.APIError, grpc.aio.AioRpcError, ValueError) as exc:
+        log.exception("Failed to process chat message")
+        await websocket.send_json({
+            "type": "error",
+            "request_id": request_id,
+            "error": f"Message failed: {exc}",
+        })
+
+
+def _log_task_failure(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        log.error("Message task crashed", exc_info=task.exception())
+
+
 async def websocket_endpoint(
     websocket: WebSocket,
     stub,
@@ -30,6 +127,8 @@ async def websocket_endpoint(
 ) -> None:
     await websocket.accept()
     log.info("WebSocket connected")
+    current: asyncio.Task | None = None
+    current_id: str | None = None
 
     try:
         while True:
@@ -45,6 +144,12 @@ async def websocket_endpoint(
             # Handled before the rate limit, so a throttled user stays connected.
             if isinstance(payload, dict) and payload.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
+                continue
+
+            busy = current is not None and not current.done()
+            if isinstance(payload, dict) and payload.get("type") == "cancel":
+                if busy and payload.get("request_id") == current_id:
+                    current.cancel()
                 continue
 
             # Support structured JSON and plain-text messages.
@@ -74,6 +179,15 @@ async def websocket_endpoint(
                 })
                 continue
 
+            # One at a time; refused messages do not use up the user's quota.
+            if busy:
+                await websocket.send_json({
+                    "type": "error",
+                    "request_id": request_id,
+                    "error": "Still answering the previous message.",
+                })
+                continue
+
             # Rate limit: only valid messages count, since only they cost money.
             retry_after = message_limit_retry_after(user_id)
             if retry_after is not None:
@@ -84,93 +198,20 @@ async def websocket_endpoint(
                 })
                 continue
 
-            try:
-                # The gRPC service filters by the authenticated user and returns
-                # NOT_FOUND for both missing and foreign conversation IDs.
-                conversation = await stub.GetConversation(
-                    chat_pb2.GetConversationRequest(
-                        conversation_id=conversation_id,
-                    )
+            current_id = request_id
+            current = asyncio.create_task(
+                _process_message(
+                    websocket, stub, gemini_client, model,
+                    message, request_id, conversation_id,
                 )
-                history = [
-                    {"role": item.role, "content": item.content}
-                    for item in conversation.messages
-                ]
-
-                # Step 1: Classify the user's message.
-                decision = await classify_message(
-                    message,
-                    gemini_client,
-                    model,
-                )
-
-                # Step 2: Handle general chat with true Gemini streaming.
-                if decision["intent"] == "CHAT":
-                    await websocket.send_json({
-                        "type": "start",
-                        "request_id": request_id,
-                        "role": "assistant",
-                    })
-
-                    response_chunks = []
-
-                    async for chunk in stream_chat_response(
-                        message,
-                        gemini_client,
-                        model,
-                        history,
-                    ):
-                        response_chunks.append(chunk)
-
-                        # Immediately forward each Gemini chunk.
-                        await websocket.send_json({
-                            "type": "chunk",
-                            "request_id": request_id,
-                            "content": chunk,
-                        })
-
-                    response = "".join(response_chunks)
-
-                    if not response:
-                        raise ValueError("Gemini returned an empty response.")
-
-                # Step 3: Handle actions through gRPC.
-                else:
-                    response = await execute_action(decision, stub)
-
-                    await websocket.send_json({
-                        "type": "start",
-                        "request_id": request_id,
-                        "role": "assistant",
-                    })
-
-                    # Action results are already complete, so send them once.
-                    await websocket.send_json({
-                        "type": "chunk",
-                        "request_id": request_id,
-                        "content": response,
-                    })
-
-                # Step 4: Save the completed exchange through gRPC.
-                await save_conversation(
-                    message, response, stub, conversation_id
-                )
-
-                # Step 5: Tell the frontend the response is complete.
-                await websocket.send_json({
-                    "type": "complete",
-                    "request_id": request_id,
-                })
-
-            except (errors.APIError, grpc.aio.AioRpcError, ValueError) as exc:
-                log.exception("Failed to process chat message")
-
-                await websocket.send_json({
-                    "type": "error",
-                    "request_id": request_id,
-                    "error": f"Message failed: {exc}",
-                })
+            )
+            current.add_done_callback(_log_task_failure)
 
     except WebSocketDisconnect:
         log.info("WebSocket disconnected")
+    finally:
+        if current is not None and not current.done():
+            current.cancel()
+        if current is not None:
+            await asyncio.gather(current, return_exceptions=True)
 
