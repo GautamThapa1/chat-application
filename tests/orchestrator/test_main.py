@@ -132,6 +132,7 @@ async def test_websocket_route_passes_dependencies(monkeypatch):
 
     # Act
     await main.ws_chat(fake_websocket)
+    assert endpoint.await_args.kwargs["user_id"] == 1
 
     # Assert
     endpoint.assert_awaited_once()

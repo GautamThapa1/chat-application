@@ -97,6 +97,7 @@ async def test_websocket_streams_chat_and_saves_response(monkeypatch):
         stub,
         gemini_client,
         "test-model",
+        user_id=1,
     )
 
     # Assert
@@ -170,6 +171,7 @@ async def test_websocket_handles_action_request(monkeypatch):
         stub,
         gemini_client,
         "test-model",
+        user_id=1,
     )
 
     # Assert
@@ -220,6 +222,7 @@ async def test_websocket_rejects_invalid_payload(monkeypatch):
         fake_stub(),
         object(),
         "test-model",
+        user_id=1,
     )
 
     # Assert
@@ -261,6 +264,7 @@ async def test_websocket_does_not_save_incomplete_stream(monkeypatch):
         stub,
         gemini_client,
         "test-model",
+        user_id=1,
     )
 
     # Assert
@@ -293,9 +297,69 @@ async def test_websocket_does_not_process_a_foreign_conversation(monkeypatch):
     monkeypatch.setattr(websocket_module, "classify_message", classify)
 
     await websocket_module.websocket_endpoint(
-        websocket, stub, object(), "test-model"
+        websocket, stub, object(), "test-model", user_id=1
     )
 
     assert websocket.sent_messages[-1]["type"] == "error"
     assert "NOT_FOUND" in websocket.sent_messages[-1]["error"]
     classify.assert_not_awaited()
+
+def patch_chat(monkeypatch):
+    """Replace Gemini and gRPC helpers; return the classify mock."""
+    classify = AsyncMock(return_value={"intent": "CHAT"})
+
+    async def fake_stream(message, client, model, prior_history):
+        yield "ok"
+
+    monkeypatch.setattr(websocket_module, "classify_message", classify)
+    monkeypatch.setattr(websocket_module, "save_conversation", AsyncMock())
+    monkeypatch.setattr(websocket_module, "stream_chat_response", fake_stream)
+    return classify
+
+
+@pytest.mark.asyncio
+async def test_websocket_blocks_the_eleventh_message(monkeypatch):
+    classify = patch_chat(monkeypatch)
+    websocket = FakeWebSocket([
+        create_message("hi", request_id=f"r{i}") for i in range(11)
+    ])
+
+    await websocket_module.websocket_endpoint(
+        websocket, fake_stub(), object(), "test-model", user_id=1,
+    )
+
+    errors = [e for e in websocket.sent_messages if e["type"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["request_id"] == "r10"          # the 11th message
+    assert "Too many messages" in errors[0]["error"]
+    assert classify.await_count == 10                # Gemini never saw the 11th
+
+
+@pytest.mark.asyncio
+async def test_websocket_limit_is_per_user(monkeypatch):
+    patch_chat(monkeypatch)
+    for _ in range(10):  # user 1 uses up their quota
+        websocket = FakeWebSocket([create_message("hi")])
+        await websocket_module.websocket_endpoint(
+            websocket, fake_stub(), object(), "test-model", user_id=1,
+        )
+
+    other = FakeWebSocket([create_message("hi")])
+    await websocket_module.websocket_endpoint(
+        other, fake_stub(), object(), "test-model", user_id=2,
+    )
+
+    assert not [e for e in other.sent_messages if e["type"] == "error"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_payloads_do_not_use_up_the_quota(monkeypatch):
+    classify = patch_chat(monkeypatch)
+    junk = ["not json"] * 20
+    websocket = FakeWebSocket(junk + [create_message("hi")])
+
+    await websocket_module.websocket_endpoint(
+        websocket, fake_stub(), object(), "test-model", user_id=1,
+    )
+
+    assert classify.await_count == 1                 # the real message got through
