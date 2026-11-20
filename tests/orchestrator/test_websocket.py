@@ -363,3 +363,40 @@ async def test_invalid_payloads_do_not_use_up_the_quota(monkeypatch):
     )
 
     assert classify.await_count == 1                 # the real message got through
+
+@pytest.mark.asyncio
+async def test_ping_gets_a_pong(monkeypatch):
+    websocket = FakeWebSocket([json.dumps({"type": "ping"})])
+
+    await websocket_module.websocket_endpoint(
+        websocket, fake_stub(), object(), "test-model", user_id=1,
+    )
+
+    assert websocket.sent_messages == [{"type": "pong"}]
+
+
+@pytest.mark.asyncio
+async def test_pings_do_not_use_up_the_message_quota(monkeypatch):
+    classify = patch_chat(monkeypatch)
+    pings = [json.dumps({"type": "ping"})] * 50
+    websocket = FakeWebSocket(pings + [create_message("hi")])
+
+    await websocket_module.websocket_endpoint(
+        websocket, fake_stub(), object(), "test-model", user_id=1,
+    )
+
+    assert classify.await_count == 1
+    assert not [e for e in websocket.sent_messages if e["type"] == "error"]
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_user_still_gets_pongs(monkeypatch):
+    patch_chat(monkeypatch)
+    messages = [create_message("hi", request_id=f"r{i}") for i in range(11)]
+    websocket = FakeWebSocket(messages + [json.dumps({"type": "ping"})])
+
+    await websocket_module.websocket_endpoint(
+        websocket, fake_stub(), object(), "test-model", user_id=1,
+    )
+
+    assert websocket.sent_messages[-1] == {"type": "pong"}
