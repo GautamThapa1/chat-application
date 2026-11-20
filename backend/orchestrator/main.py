@@ -6,18 +6,21 @@ from pathlib import Path
 
 import grpc
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
 
 from backend.generated import chat_pb2_grpc
 from backend.orchestrator import auth, conversations
 from backend.orchestrator.grpc_session import SessionStub
-from backend.orchestrator.rate_limit import limiter
+from backend.orchestrator.rate_limit import default_limit_retry_after, limiter
 from backend.orchestrator.websocket import websocket_endpoint
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 levels above
@@ -62,6 +65,18 @@ app.add_exception_handler(
     RateLimitExceeded,
     _rate_limit_exceeded_handler
 )
+
+@app.middleware("http")  # HTTP only: WebSockets are not touched (step 3)
+async def default_rate_limit(request: Request, call_next):
+    retry_after = default_limit_retry_after(get_remote_address(request))
+    if retry_after is not None:
+        return JSONResponse(
+            {"detail": "Too many requests. Please slow down."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+    return await call_next(request)
+
 
 @app.websocket("/ws") # frontend connects here
 async def ws_chat(ws: WebSocket):
