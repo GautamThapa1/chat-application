@@ -10,10 +10,13 @@ from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from backend.generated import chat_pb2_grpc
 from backend.orchestrator import auth, conversations
 from backend.orchestrator.grpc_session import SessionStub
+from backend.orchestrator.rate_limit import limiter
 from backend.orchestrator.websocket import websocket_endpoint
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 levels above
@@ -52,6 +55,12 @@ async def lifespan(app: FastAPI): # lifespan: manages the gRPC object and channe
 
 
 app = FastAPI(title="chat-orchestrator", lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(
+    RateLimitExceeded,
+    _rate_limit_exceeded_handler
+)
 
 @app.websocket("/ws") # frontend connects here
 async def ws_chat(ws: WebSocket):

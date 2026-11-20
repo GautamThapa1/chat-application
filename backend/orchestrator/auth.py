@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 from pydantic import BaseModel, Field
 
 from backend.generated import chat_pb2
+from backend.orchestrator.rate_limit import limiter
 
 log = logging.getLogger("orchestrator")
 
@@ -62,15 +63,19 @@ def _http_error(exc: grpc.aio.AioRpcError) -> HTTPException:
 
 
 @router.post("/register", status_code=201)
+@limiter.limit("5 per 15 minutes")
 async def register(body: RegisterBody, request: Request):
     try:
         result = await request.app.state.grpc_stub.Register(
-            chat_pb2.RegisterRequest(username=body.username, password=body.password)
+            chat_pb2.RegisterRequest(
+                username=body.username,
+                password=body.password
+            )
         )
     except grpc.aio.AioRpcError as exc:
         raise _http_error(exc) from exc
-    return {"user_id": result.user_id}
 
+    return {"user_id": result.user_id}
 
 @router.post("/login")
 async def login(body: LoginBody, request: Request, response: Response):
