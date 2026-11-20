@@ -15,6 +15,7 @@ from backend.orchestrator.intent_handler import (
     execute_action,
     save_conversation,
 )
+from backend.orchestrator.rate_limit import message_limit_retry_after
 
 log = logging.getLogger("orchestrator")
 
@@ -24,6 +25,8 @@ async def websocket_endpoint(
     stub,
     gemini_client,
     model: str,
+    *,
+    user_id: int,
 ) -> None:
     await websocket.accept()
     log.info("WebSocket connected")
@@ -62,6 +65,16 @@ async def websocket_endpoint(
                     "type": "error",
                     "request_id": None,
                     "error": "Invalid message payload.",
+                })
+                continue
+
+            # Rate limit: only valid messages count, since only they cost money.
+            retry_after = message_limit_retry_after(user_id)
+            if retry_after is not None:
+                await websocket.send_json({
+                    "type": "error",
+                    "request_id": request_id,
+                    "error": f"Too many messages. Try again in {retry_after}s.",
                 })
                 continue
 

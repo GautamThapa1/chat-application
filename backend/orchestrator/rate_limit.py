@@ -3,8 +3,7 @@ import time
 
 from limits import parse
 from limits.storage import MemoryStorage
-from limits.strategies import FixedWindowRateLimiter
-
+from limits.strategies import FixedWindowRateLimiter, MovingWindowRateLimiter
 from slowapi import Limiter
 from slowapi.util import get_remote_address  # identifies the client using the address
 
@@ -24,6 +23,17 @@ def default_limit_retry_after(client_id: str) -> int | None:
     stats = strategy.get_window_stats(DEFAULT_LIMIT, "default", client_id)
     return max(1, math.ceil(stats.reset_time - time.time()))
 
+moving_strategy = MovingWindowRateLimiter(storage)
+MESSAGE_LIMIT = parse("10/minute")
+
+
+def message_limit_retry_after(user_id: int) -> int | None:
+    """None if this user may send a chat message, else seconds to wait."""
+    key = str(user_id)
+    if moving_strategy.hit(MESSAGE_LIMIT, "ws-message", key):
+        return None
+    stats = moving_strategy.get_window_stats(MESSAGE_LIMIT, "ws-message", key)
+    return max(1, math.ceil(stats.reset_time - time.time()))
 
 def reset_limits() -> None:
     """Clear all counters. Used by tests."""

@@ -94,6 +94,7 @@ async def ws_chat(ws: WebSocket):
         stub,
         ws.app.state.gemini_client,
         ws.app.state.gemini_model,
+        user_id=user_id,
     )
 
 app.include_router(auth.router)  # must come BEFORE the "/" static mount
