@@ -159,6 +159,10 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             ]
         )
 
+    def ClearNotes(self, request, context):
+        deleted_count = db.clear_notes(current_user_id())
+        return chat_pb2.ClearNotesResponse(deleted_count=deleted_count)
+
     # ---------------------------------------------------------------- #
     # Tasks  (db.create_task / db.get_tasks / db.complete_task)
     # ---------------------------------------------------------------- #

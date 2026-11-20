@@ -37,6 +37,18 @@ def test_search_notes_is_case_insensitive_and_owner_scoped(owners_db):
     assert db.search_notes(user_b, "roadmap")[0]["title"] == "Roadmap"
 
 
+def test_clear_notes_deletes_only_the_owners_notes(owners_db):
+    user_a, user_b = owners_db
+    db.save_note(user_a, "First", "first note")
+    db.save_note(user_a, "Second", "second note")
+    db.save_note(user_b, "Private", "another user's note")
+
+    assert db.clear_notes(user_a) == 2
+    assert db.search_notes(user_a, "") == []
+    assert [note["title"] for note in db.search_notes(user_b, "")] == ["Private"]
+    assert db.clear_notes(user_a) == 0
+
+
 def test_tasks_are_isolated_and_updates_check_owner(owners_db):
     user_a, user_b = owners_db
     task_a = db.create_task(user_a, "Write report", due_date="2026-12-01")

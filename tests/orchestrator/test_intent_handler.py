@@ -242,6 +242,33 @@ async def test_execute_search_notes_without_keyword():
 
 
 @pytest.mark.asyncio
+async def test_execute_clear_notes_reports_deleted_count():
+    stub = SimpleNamespace(
+        ClearNotes=AsyncMock(
+            return_value=SimpleNamespace(deleted_count=2)
+        )
+    )
+
+    result = await execute_action({"intent": "CLEAR_NOTES"}, stub)
+
+    assert result == "🗑️ Removed 2 note(s)."
+    stub.ClearNotes.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_clear_notes_when_empty():
+    stub = SimpleNamespace(
+        ClearNotes=AsyncMock(
+            return_value=SimpleNamespace(deleted_count=0)
+        )
+    )
+
+    result = await execute_action({"intent": "CLEAR_NOTES"}, stub)
+
+    assert result == "🔍 You have no notes to remove."
+
+
+@pytest.mark.asyncio
 async def test_execute_create_task():
     # Arrange
     stub = SimpleNamespace(

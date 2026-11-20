@@ -116,6 +116,12 @@ message SearchNotesResponse {
   repeated Note notes = 1;
 }
 
+message ClearNotesRequest {}
+
+message ClearNotesResponse {
+  int64 deleted_count = 1;
+}
+
 // =========================================================================== #
 // Tasks request/response
 // =========================================================================== #
@@ -196,6 +202,7 @@ service ChatService {
 
   rpc SaveNote(SaveNoteRequest)         returns (SaveNoteResponse);
   rpc SearchNotes(SearchNotesRequest)   returns (SearchNotesResponse);
+  rpc ClearNotes(ClearNotesRequest)     returns (ClearNotesResponse);
   rpc CreateTask(CreateTaskRequest)     returns (CreateTaskResponse);
   rpc ListTasks(ListTasksRequest)       returns (ListTasksResponse);
   rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);

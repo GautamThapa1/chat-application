@@ -159,6 +159,9 @@ def test_conversations_notes_and_tasks_are_isolated(stub):
     assert not stub.SearchNotes(
         chat_pb2.SearchNotesRequest(keyword="secret"), metadata=metadata_b
     ).notes
+    assert stub.ClearNotes(
+        chat_pb2.ClearNotesRequest(), metadata=metadata_b
+    ).deleted_count == 0
     assert not stub.ListTasks(
         chat_pb2.ListTasksRequest(), metadata=metadata_b
     ).tasks
@@ -187,6 +190,12 @@ def test_conversations_notes_and_tasks_are_isolated(stub):
     assert stub.SearchNotes(
         chat_pb2.SearchNotesRequest(keyword="secret"), metadata=metadata_a
     ).notes[0].id == note.note.id
+    assert stub.ClearNotes(
+        chat_pb2.ClearNotesRequest(), metadata=metadata_a
+    ).deleted_count == 1
+    assert not stub.SearchNotes(
+        chat_pb2.SearchNotesRequest(keyword="secret"), metadata=metadata_a
+    ).notes
     assert stub.ListTasks(
         chat_pb2.ListTasksRequest(), metadata=metadata_a
     ).tasks[0].id == task.task.id
@@ -196,6 +205,10 @@ def test_conversation_endpoints_require_a_valid_session(stub):
     with pytest.raises(grpc.RpcError) as missing:
         stub.ListConversations(chat_pb2.ListConversationsRequest())
     assert missing.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+    with pytest.raises(grpc.RpcError) as clear_notes:
+        stub.ClearNotes(chat_pb2.ClearNotesRequest())
+    assert clear_notes.value.code() == grpc.StatusCode.UNAUTHENTICATED
 
     with pytest.raises(grpc.RpcError) as invalid:
         stub.GetConversation(

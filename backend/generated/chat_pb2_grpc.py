@@ -97,6 +97,11 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.SearchNotesRequest.SerializeToString,
                 response_deserializer=chat__pb2.SearchNotesResponse.FromString,
                 _registered_method=True)
+        self.ClearNotes = channel.unary_unary(
+                '/chat.ChatService/ClearNotes',
+                request_serializer=chat__pb2.ClearNotesRequest.SerializeToString,
+                response_deserializer=chat__pb2.ClearNotesResponse.FromString,
+                _registered_method=True)
         self.CreateTask = channel.unary_unary(
                 '/chat.ChatService/CreateTask',
                 request_serializer=chat__pb2.CreateTaskRequest.SerializeToString,
@@ -192,6 +197,12 @@ class ChatServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ClearNotes(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def CreateTask(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -272,6 +283,11 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     servicer.SearchNotes,
                     request_deserializer=chat__pb2.SearchNotesRequest.FromString,
                     response_serializer=chat__pb2.SearchNotesResponse.SerializeToString,
+            ),
+            'ClearNotes': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClearNotes,
+                    request_deserializer=chat__pb2.ClearNotesRequest.FromString,
+                    response_serializer=chat__pb2.ClearNotesResponse.SerializeToString,
             ),
             'CreateTask': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateTask,
@@ -616,6 +632,33 @@ class ChatService:
             '/chat.ChatService/SearchNotes',
             chat__pb2.SearchNotesRequest.SerializeToString,
             chat__pb2.SearchNotesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ClearNotes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/ClearNotes',
+            chat__pb2.ClearNotesRequest.SerializeToString,
+            chat__pb2.ClearNotesResponse.FromString,
             options,
             channel_credentials,
             insecure,

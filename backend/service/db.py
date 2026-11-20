@@ -311,6 +311,17 @@ def search_notes(user_id: int, keyword: str) -> list[dict]:
         conn.close()
 
 
+def clear_notes(user_id: int) -> int:
+    """Delete all notes owned by a user and return the number deleted."""
+    conn = get_connection()
+    try:
+        with conn:
+            cur = conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # Tasks
 # --------------------------------------------------------------------------- #
