@@ -62,7 +62,6 @@ app.add_exception_handler(
     RateLimitExceeded,
     _rate_limit_exceeded_handler
 )
-app.add_middleware(SlowAPIMiddleware)
 
 @app.websocket("/ws") # frontend connects here
 async def ws_chat(ws: WebSocket):
