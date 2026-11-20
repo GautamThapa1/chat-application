@@ -9,6 +9,7 @@ dependencies = [
     "google-genai>=1.0,<3.0",
     "grpcio>=1.85.3",
     "grpcio-tools>=1.85.3",
+    "limits>=5.8.0",
     "python-dotenv>=1.2.4",
     "slowapi>=0.1.10",
     "uvicorn[standard]>=0.54.0",
