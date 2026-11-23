@@ -66,9 +66,19 @@ Create a `.env` file in the project root:
 ```env
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3.5-flash-lite
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 GEMINI_MAX_INPUT_TOKENS=24000
 DATABASE_KEY=your_long_random_database_key
 ```
+
+Notes are indexed with Gemini embeddings. The gRPC service queues new and
+updated notes, backfills existing notes at startup, and retries failed
+embeddings without delaying or undoing note saves. The encrypted SQLite
+database remains the source of truth; a SQLite vector table keyed by note ID
+provides an idempotent index. Search combines semantic similarity with the
+existing keyword search and falls back to keyword-only search if query
+embedding fails. Similarity is calculated over the signed-in user's indexed
+notes in Python, so search cost grows linearly with that user's indexed notes.
 
 Chat history is trimmed to the newest complete turns that fit this input-token
 budget. The current message is included in the count; messages exceeding the
