@@ -175,6 +175,7 @@ async def test_websocket_streams_chat_and_saves_response(monkeypatch):
         "Hello there!",
         stub,
         3,
+        "request-1",
     )
     stub.GetConversation.assert_awaited_once()
     assert stub.GetConversation.await_args.args[0].conversation_id == 3
@@ -240,6 +241,7 @@ async def test_websocket_handles_action_request(monkeypatch):
         "Note saved successfully",
         stub,
         3,
+        "request-1",
     )
 
 

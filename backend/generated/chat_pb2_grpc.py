@@ -62,6 +62,21 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.DeleteConversationRequest.SerializeToString,
                 response_deserializer=chat__pb2.DeleteConversationResponse.FromString,
                 _registered_method=True)
+        self.EditConversationMessage = channel.unary_unary(
+                '/chat.ChatService/EditConversationMessage',
+                request_serializer=chat__pb2.EditConversationMessageRequest.SerializeToString,
+                response_deserializer=chat__pb2.EditConversationMessageResponse.FromString,
+                _registered_method=True)
+        self.RegenerateConversationMessage = channel.unary_unary(
+                '/chat.ChatService/RegenerateConversationMessage',
+                request_serializer=chat__pb2.RegenerateConversationMessageRequest.SerializeToString,
+                response_deserializer=chat__pb2.RegenerateConversationMessageResponse.FromString,
+                _registered_method=True)
+        self.ReplaceConversationMessage = channel.unary_unary(
+                '/chat.ChatService/ReplaceConversationMessage',
+                request_serializer=chat__pb2.ReplaceConversationMessageRequest.SerializeToString,
+                response_deserializer=chat__pb2.ReplaceConversationMessageResponse.FromString,
+                _registered_method=True)
         self.Register = channel.unary_unary(
                 '/chat.ChatService/Register',
                 request_serializer=chat__pb2.RegisterRequest.SerializeToString,
@@ -165,6 +180,24 @@ class ChatServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def DeleteConversation(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def EditConversationMessage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RegenerateConversationMessage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReplaceConversationMessage(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -281,6 +314,21 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     servicer.DeleteConversation,
                     request_deserializer=chat__pb2.DeleteConversationRequest.FromString,
                     response_serializer=chat__pb2.DeleteConversationResponse.SerializeToString,
+            ),
+            'EditConversationMessage': grpc.unary_unary_rpc_method_handler(
+                    servicer.EditConversationMessage,
+                    request_deserializer=chat__pb2.EditConversationMessageRequest.FromString,
+                    response_serializer=chat__pb2.EditConversationMessageResponse.SerializeToString,
+            ),
+            'RegenerateConversationMessage': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegenerateConversationMessage,
+                    request_deserializer=chat__pb2.RegenerateConversationMessageRequest.FromString,
+                    response_serializer=chat__pb2.RegenerateConversationMessageResponse.SerializeToString,
+            ),
+            'ReplaceConversationMessage': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReplaceConversationMessage,
+                    request_deserializer=chat__pb2.ReplaceConversationMessageRequest.FromString,
+                    response_serializer=chat__pb2.ReplaceConversationMessageResponse.SerializeToString,
             ),
             'Register': grpc.unary_unary_rpc_method_handler(
                     servicer.Register,
@@ -491,6 +539,87 @@ class ChatService:
             '/chat.ChatService/DeleteConversation',
             chat__pb2.DeleteConversationRequest.SerializeToString,
             chat__pb2.DeleteConversationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def EditConversationMessage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/EditConversationMessage',
+            chat__pb2.EditConversationMessageRequest.SerializeToString,
+            chat__pb2.EditConversationMessageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegenerateConversationMessage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/RegenerateConversationMessage',
+            chat__pb2.RegenerateConversationMessageRequest.SerializeToString,
+            chat__pb2.RegenerateConversationMessageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReplaceConversationMessage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/ReplaceConversationMessage',
+            chat__pb2.ReplaceConversationMessageRequest.SerializeToString,
+            chat__pb2.ReplaceConversationMessageResponse.FromString,
             options,
             channel_credentials,
             insecure,

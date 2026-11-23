@@ -30,17 +30,59 @@ async def _process_message(
     message: str,
     request_id: str,
     conversation_id: int,
+    *,
+    mode: str = "message",
+    message_id: int | None = None,
+    assistant_message_id: int | None = None,
 ) -> None:
     """Answer one chat message while the receive loop remains responsive."""
     response_chunks: list[str] = []
     try:
-        conversation = await stub.GetConversation(
-            chat_pb2.GetConversationRequest(conversation_id=conversation_id)
-        )
-        history = [
-            {"role": item.role, "content": item.content}
-            for item in conversation.messages
-        ]
+        history = []
+        replace_assistant_id = None
+
+        if mode == "edit" and message_id is not None:
+            # Editing a branch updates the original row and deletes every later
+            # message before Gemini sees the edited prompt.
+            edited = await stub.EditConversationMessage(
+                chat_pb2.EditConversationMessageRequest(
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    content=message,
+                    request_id=request_id,
+                )
+            )
+            message = edited.user_content
+            conversation = await stub.GetConversation(
+                chat_pb2.GetConversationRequest(conversation_id=conversation_id)
+            )
+            history = [
+                {"role": item.role, "content": item.content}
+                for item in conversation.messages
+                if item.message_id != message_id
+            ]
+        elif mode == "regenerate" and assistant_message_id is not None:
+            context = await stub.RegenerateConversationMessage(
+                chat_pb2.RegenerateConversationMessageRequest(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message_id,
+                    request_id=request_id,
+                )
+            )
+            message = context.user_content
+            history = [
+                {"role": item.role, "content": item.content}
+                for item in context.history
+            ]
+            replace_assistant_id = assistant_message_id
+        else:
+            conversation = await stub.GetConversation(
+                chat_pb2.GetConversationRequest(conversation_id=conversation_id)
+            )
+            history = [
+                {"role": item.role, "content": item.content}
+                for item in conversation.messages
+            ]
         # this sends to gemini
         await websocket.send_json({
             "type": "start",
@@ -78,7 +120,34 @@ async def _process_message(
                 "content": response,
             })
 
-        await save_conversation(message, response, stub, conversation_id)
+        if replace_assistant_id is not None:
+            replaced = await stub.ReplaceConversationMessage(
+                chat_pb2.ReplaceConversationMessageRequest(
+                    conversation_id=conversation_id,
+                    message_id=replace_assistant_id,
+                    content=response,
+                    request_id=request_id,
+                )
+            )
+            if not replaced.success:
+                raise ValueError("Could not replace the assistant response.")
+        else:
+            if mode == "edit":
+                await save_conversation(
+                    message,
+                    response,
+                    stub,
+                    conversation_id,
+                    request_id,
+                )
+            else:
+                await save_conversation(
+                    message,
+                    response,
+                    stub,
+                    conversation_id,
+                    request_id,
+                )
         await websocket.send_json({
             "type": "complete",
             "request_id": request_id,
@@ -88,7 +157,13 @@ async def _process_message(
         partial = "".join(response_chunks)
         if partial:
             try:
-                await save_conversation(message, partial, stub, conversation_id)
+                await save_conversation(
+                    message,
+                    partial,
+                    stub,
+                    conversation_id,
+                    request_id,
+                )
             except grpc.aio.AioRpcError:
                 log.exception("Could not save the partial reply")
         with contextlib.suppress(WebSocketDisconnect, RuntimeError, OSError):
@@ -166,6 +241,9 @@ async def websocket_endpoint(
                 message = payload.get("content")
                 request_id = payload.get("request_id")
                 conversation_id = payload.get("conversation_id")
+                mode = payload.get("mode", "message")
+                message_id = payload.get("message_id")
+                assistant_message_id = payload.get("assistant_message_id")
 
                 if (
                     not isinstance(message, str)
@@ -173,6 +251,29 @@ async def websocket_endpoint(
                     or isinstance(conversation_id, bool)
                     or not isinstance(conversation_id, int)
                     or conversation_id < 1
+                    or mode not in {"message", "edit", "regenerate"}
+                ):
+                    await websocket.send_json({
+                        "type": "error",
+                        "request_id": request_id,
+                        "error": "Invalid message payload.",
+                    })
+                    continue
+                if mode == "edit" and (
+                    isinstance(message_id, bool)
+                    or not isinstance(message_id, int)
+                    or message_id < 1
+                ):
+                    await websocket.send_json({
+                        "type": "error",
+                        "request_id": request_id,
+                        "error": "Invalid message payload.",
+                    })
+                    continue
+                if mode == "regenerate" and (
+                    isinstance(assistant_message_id, bool)
+                    or not isinstance(assistant_message_id, int)
+                    or assistant_message_id < 1
                 ):
                     await websocket.send_json({
                         "type": "error",
@@ -212,6 +313,9 @@ async def websocket_endpoint(
                 _process_message(
                     websocket, stub, gemini_client, model,
                     message, request_id, conversation_id,
+                    mode=mode,
+                    message_id=message_id,
+                    assistant_message_id=assistant_message_id,
                 )
             )
             current.add_done_callback(_log_task_failure)

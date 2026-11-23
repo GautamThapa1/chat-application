@@ -20,6 +20,7 @@ message SaveConversationRequest {
   string user_content      = 1;
   string assistant_content = 2;
   int64  conversation_id   = 3;
+  string request_id        = 4;
 }
 
 message SaveConversationResponse {
@@ -75,6 +76,41 @@ message DeleteConversationRequest {
 }
 
 message DeleteConversationResponse {
+  bool success = 1;
+}
+
+message EditConversationMessageRequest {
+  int64  conversation_id = 1;
+  int64  message_id      = 2;
+  string content         = 3;
+  string request_id      = 4;
+}
+
+message EditConversationMessageResponse {
+  bool success = 1;
+  string user_content = 2;
+}
+
+message RegenerateConversationMessageRequest {
+  int64  conversation_id = 1;
+  int64  assistant_message_id = 2;
+  string request_id = 3;
+}
+
+message RegenerateConversationMessageResponse {
+  bool success = 1;
+  string user_content = 2;
+  repeated ConversationMessage history = 3;
+}
+
+message ReplaceConversationMessageRequest {
+  int64  conversation_id = 1;
+  int64  message_id      = 2;
+  string content         = 3;
+  string request_id      = 4;
+}
+
+message ReplaceConversationMessageResponse {
   bool success = 1;
 }
 
@@ -228,6 +264,9 @@ service ChatService {
   rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
   rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
   rpc DeleteConversation(DeleteConversationRequest) returns (DeleteConversationResponse);
+  rpc EditConversationMessage(EditConversationMessageRequest) returns (EditConversationMessageResponse);
+  rpc RegenerateConversationMessage(RegenerateConversationMessageRequest) returns (RegenerateConversationMessageResponse);
+  rpc ReplaceConversationMessage(ReplaceConversationMessageRequest) returns (ReplaceConversationMessageResponse);
   rpc Register(RegisterRequest)                 returns (RegisterResponse);
   rpc Login(LoginRequest)                       returns (LoginResponse);
   rpc Logout(LogoutRequest)                     returns (LogoutResponse);

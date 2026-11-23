@@ -28,6 +28,74 @@ def owners_db(tmp_path, monkeypatch):
     return user_a, user_b
 
 
+def test_edit_message_updates_and_deletes_later_messages(owners_db):
+    user_a, user_b = owners_db
+    conversation = db.create_conversation(user_a, "Edit test")
+    db.save_conversation(user_a, conversation["id"], "First", "First answer")
+    db.save_conversation(user_a, conversation["id"], "Second", "Second answer")
+
+    messages = db.get_conversation_messages(user_a, conversation["id"])
+    first_user = next(row for row in messages if row["role"] == "user")
+
+    success, content = db.edit_conversation_message(
+        user_a,
+        conversation["id"],
+        first_user["id"],
+        "Edited first",
+    )
+    assert success
+    assert content == "Edited first"
+    remaining = db.get_conversation_messages(user_a, conversation["id"])
+    assert [row["content"] for row in remaining] == ["Edited first"]
+
+    assert not db.edit_conversation_message(
+        user_b,
+        conversation["id"],
+        first_user["id"],
+        "Private edit",
+    )[0]
+
+
+def test_regenerate_context_and_assistant_replacement(owners_db):
+    user_a, _ = owners_db
+    conversation = db.create_conversation(user_a, "Regenerate test")
+    db.save_conversation(user_a, conversation["id"], "Question", "Old answer")
+    db.save_conversation(user_a, conversation["id"], "Later", "Later answer")
+
+    messages = db.get_conversation_messages(user_a, conversation["id"])
+    first_assistant = next(row for row in messages if row["role"] == "assistant")
+
+    success, user_content, history = db.get_regeneration_context(
+        user_a,
+        conversation["id"],
+        first_assistant["id"],
+    )
+    assert success
+    assert user_content == "Question"
+    assert history == []
+
+    assert db.replace_assistant_response(
+        user_a,
+        conversation["id"],
+        first_assistant["id"],
+        "New answer",
+        "regenerate-request",
+    )
+    remaining = db.get_conversation_messages(user_a, conversation["id"])
+    assert [row["content"] for row in remaining] == ["Question", "New answer"]
+
+    # The same request ID does not create or replace the response twice.
+    assert db.replace_assistant_response(
+        user_a,
+        conversation["id"],
+        first_assistant["id"],
+        "Should not replace",
+        "regenerate-request",
+    )
+    remaining = db.get_conversation_messages(user_a, conversation["id"])
+    assert remaining[-1]["content"] == "New answer"
+
+
 def test_notes_are_isolated_by_owner(owners_db):
     user_a, user_b = owners_db
     note_id = db.save_note(user_a, "Grocery", "milk, eggs, bread")

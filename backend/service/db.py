@@ -252,6 +252,19 @@ def init_db():
                     PRIMARY KEY (user_id, idempotency_key)
                 )
             """)
+            # Conversation responses use this small marker table to make
+            # WebSocket retries idempotent without adding hidden chat messages.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_response_requests (
+                    conversation_id INTEGER NOT NULL,
+                    user_id         INTEGER NOT NULL,
+                    request_id      TEXT NOT NULL,
+                    PRIMARY KEY (conversation_id, user_id, request_id),
+                    FOREIGN KEY (conversation_id, user_id)
+                        REFERENCES conversations(conversation_id, user_id)
+                        ON DELETE CASCADE
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -489,6 +502,157 @@ def get_conversation_messages(user_id: int, conversation_id: int) -> list[dict]:
         conn.close()
 
 
+def edit_conversation_message(
+    user_id: int,
+    conversation_id: int,
+    message_id: int,
+    content: str,
+) -> tuple[bool, str]:
+    """Edit a user message and remove every later message atomically."""
+    content = content.strip()
+    if not content:
+        raise ValueError("Message content must not be empty.")
+
+    conn = get_connection()
+    try:
+        with conn:
+            message = conn.execute(
+                """SELECT message_id, role
+                     FROM messages
+                    WHERE message_id = ? AND conversation_id = ?
+                      AND user_id = ?""",
+                (message_id, conversation_id, user_id),
+            ).fetchone()
+            if message is None or message["role"] != "user":
+                return False, ""
+
+            # Deleting by message ID uses SQLite's creation order: everything
+            # after this user message is part of the abandoned branch.
+            conn.execute(
+                """DELETE FROM messages
+                  WHERE conversation_id = ? AND user_id = ?
+                    AND message_id > ?""",
+                (conversation_id, user_id, message_id),
+            )
+            conn.execute(
+                """UPDATE messages SET content = ?
+                  WHERE message_id = ? AND conversation_id = ? AND user_id = ?""",
+                (content, message_id, conversation_id, user_id),
+            )
+            conn.execute(
+                """UPDATE conversations SET updated_at = CURRENT_TIMESTAMP
+                  WHERE conversation_id = ? AND user_id = ?""",
+                (conversation_id, user_id),
+            )
+            return True, content
+    finally:
+        conn.close()
+
+
+def get_regeneration_context(
+    user_id: int,
+    conversation_id: int,
+    assistant_message_id: int,
+) -> tuple[bool, str, list[dict]]:
+    """Find the assistant's preceding user message and history before it."""
+    conn = get_connection()
+    try:
+        assistant = conn.execute(
+            """SELECT message_id
+                 FROM messages
+                WHERE message_id = ? AND conversation_id = ?
+                  AND user_id = ? AND role = 'assistant'""",
+            (assistant_message_id, conversation_id, user_id),
+        ).fetchone()
+        if assistant is None:
+            return False, "", []
+
+        user_message = conn.execute(
+            """SELECT message_id, content
+                 FROM messages
+                WHERE conversation_id = ? AND user_id = ?
+                  AND role = 'user' AND message_id < ?
+                ORDER BY message_id DESC
+                LIMIT 1""",
+            (conversation_id, user_id, assistant_message_id),
+        ).fetchone()
+        if user_message is None:
+            return False, "", []
+
+        history = conn.execute(
+            """SELECT role, content
+                 FROM messages
+                WHERE conversation_id = ? AND user_id = ?
+                  AND message_id < ? AND role IN ('user', 'assistant')
+                ORDER BY message_id""",
+            (conversation_id, user_id, user_message["message_id"]),
+        ).fetchall()
+        return True, user_message["content"], [dict(row) for row in history]
+    finally:
+        conn.close()
+
+
+def replace_assistant_response(
+    user_id: int,
+    conversation_id: int,
+    assistant_message_id: int,
+    response: str,
+    request_id: str = "",
+) -> bool:
+    """Replace one assistant response atomically and prevent duplicate retries."""
+    conn = get_connection()
+    try:
+        with conn:
+            if request_id:
+                existing = conn.execute(
+                    """SELECT 1 FROM conversation_response_requests
+                        WHERE conversation_id = ? AND user_id = ? AND request_id = ?""",
+                    (conversation_id, user_id, request_id),
+                ).fetchone()
+                if existing is not None:
+                    return True
+
+            assistant = conn.execute(
+                """SELECT message_id
+                     FROM messages
+                    WHERE message_id = ? AND conversation_id = ?
+                      AND user_id = ? AND role = 'assistant'""",
+                (assistant_message_id, conversation_id, user_id),
+            ).fetchone()
+            if assistant is None:
+                return False
+
+            # Regeneration branches from this response: discard any later turns
+            # so stale answers cannot remain after the new branch.
+            conn.execute(
+                """DELETE FROM messages
+                  WHERE conversation_id = ? AND user_id = ?
+                    AND message_id > ?""",
+                (conversation_id, user_id, assistant_message_id),
+            )
+
+            conn.execute(
+                """UPDATE messages SET content = ?, created_at = CURRENT_TIMESTAMP
+                  WHERE message_id = ? AND conversation_id = ? AND user_id = ?""",
+                (response, assistant_message_id, conversation_id, user_id),
+            )
+            if request_id:
+                conn.execute(
+                    """INSERT INTO conversation_response_requests
+                       (conversation_id, user_id, request_id)
+                       VALUES (?, ?, ?)""",
+                    (conversation_id, user_id, request_id),
+                )
+            conn.execute(
+                """UPDATE conversations SET updated_at = CURRENT_TIMESTAMP
+                  WHERE conversation_id = ? AND user_id = ?""",
+                (conversation_id, user_id),
+            )
+            return True
+    finally:
+        conn.close()
+
+
 def delete_conversation(user_id: int, conversation_id: int) -> bool:
     conn = get_connection()
     try:
@@ -507,6 +671,7 @@ def save_conversation(
     conversation_id: int,
     user_content: str,
     assistant_content: str,
+    request_id: str = "",
 ) -> None:
     conn = get_connection()
     try:
@@ -517,6 +682,23 @@ def save_conversation(
             ).fetchone()
             if conversation is None:
                 raise ConversationNotFound
+
+            # A request ID prevents duplicate response pairs when a WebSocket
+            # completion/retry is delivered more than once.
+            if request_id:
+                existing = conn.execute(
+                    """SELECT 1 FROM conversation_response_requests
+                        WHERE conversation_id = ? AND user_id = ? AND request_id = ?""",
+                    (conversation_id, user_id, request_id),
+                ).fetchone()
+                if existing is not None:
+                    return
+                conn.execute(
+                    """INSERT INTO conversation_response_requests
+                       (conversation_id, user_id, request_id)
+                       VALUES (?, ?, ?)""",
+                    (conversation_id, user_id, request_id),
+                )
 
             conn.executemany(
                 """INSERT INTO messages

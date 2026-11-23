@@ -37,6 +37,18 @@ _CLEAR_CONFIRMATION_PATTERN = re.compile(
     r"`confirm clear notes ([A-Za-z0-9_-]+)`\.$"
 )
 
+PROMPT_INJECTION_PATTERN = re.compile(
+    r"(?:ignore\s+(?:the\s+)?previous\s+(?:instructions?|rules?)"
+    r"|reveal\s+(?:the\s+)?system\s+prompt"
+    r"|ignore\s+all\s+(?:instructions?|rules?))",
+    re.IGNORECASE,
+)
+
+
+def detect_prompt_injection(text: str) -> bool:
+    """Return True when text contains a common prompt-injection phrase."""
+    return isinstance(text, str) and PROMPT_INJECTION_PATTERN.search(text) is not None
+
 
 def _schema(
     schema_type: str,
@@ -529,6 +541,7 @@ async def save_conversation(
     response: str,
     stub,
     conversation_id: int,
+    request_id: str = "",
 ) -> None:
     """Persist the completed exchange through gRPC."""
     await stub.SaveConversation(
@@ -536,5 +549,6 @@ async def save_conversation(
             user_content=message,
             assistant_content=response,
             conversation_id=conversation_id,
+            request_id=request_id,
         )
     )

@@ -65,6 +65,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                 request.conversation_id,
                 request.user_content,
                 request.assistant_content,
+                request.request_id,
             )
         except db.ConversationNotFound:
             context.abort(grpc.StatusCode.NOT_FOUND, "Conversation not found.")
@@ -131,6 +132,57 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         if not deleted:
             context.abort(grpc.StatusCode.NOT_FOUND, "Conversation not found.")
         return chat_pb2.DeleteConversationResponse(success=True)
+
+    def EditConversationMessage(self, request, context):
+        try:
+            success, content = db.edit_conversation_message(
+                current_user_id(),
+                request.conversation_id,
+                request.message_id,
+                request.content,
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        if not success:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Message not found.")
+        return chat_pb2.EditConversationMessageResponse(
+            success=True,
+            user_content=content,
+        )
+
+    def RegenerateConversationMessage(self, request, context):
+        success, user_content, history = db.get_regeneration_context(
+            current_user_id(),
+            request.conversation_id,
+            request.assistant_message_id,
+        )
+        if not success:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Message not found.")
+        return chat_pb2.RegenerateConversationMessageResponse(
+            success=True,
+            user_content=user_content,
+            history=[
+                chat_pb2.ConversationMessage(
+                    conversation_id=request.conversation_id,
+                    user_id=current_user_id(),
+                    role=row["role"],
+                    content=row["content"],
+                )
+                for row in history
+            ],
+        )
+
+    def ReplaceConversationMessage(self, request, context):
+        success = db.replace_assistant_response(
+            current_user_id(),
+            request.conversation_id,
+            request.message_id,
+            request.content,
+            request.request_id,
+        )
+        if not success:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Message not found.")
+        return chat_pb2.ReplaceConversationMessageResponse(success=True)
 
     # ---------------------------------------------------------------- #
     # Notes  (db.save_note / db.search_notes)
