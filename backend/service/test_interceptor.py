@@ -18,6 +18,7 @@ from backend.service.auth_interceptor import (
 @pytest.fixture
 def stub(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setenv("DATABASE_KEY", "test-database-key")
     db.init_db()
 
     with socket.socket() as sock:

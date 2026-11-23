@@ -10,6 +10,7 @@ import backend.service.db as db
 @pytest.fixture
 def owners_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setenv("DATABASE_KEY", "test-database-key")
     db.init_db()
     user_a = db.register_user("alice", "correct-horse")
     user_b = db.register_user("bob", "another-horse")
@@ -130,6 +131,7 @@ def test_conversations_messages_and_deletion_are_owner_scoped(owners_db):
 def test_unowned_legacy_records_are_preserved_without_assignment(tmp_path, monkeypatch):
     path = tmp_path / "legacy.db"
     monkeypatch.setattr(db, "DB_PATH", str(path))
+    monkeypatch.setenv("DATABASE_KEY", "test-database-key")
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE messages (
@@ -160,7 +162,7 @@ def test_unowned_legacy_records_are_preserved_without_assignment(tmp_path, monke
     db.init_db()
     db.init_db()
 
-    conn = sqlite3.connect(path)
+    conn = db.get_connection()
     try:
         assert {
             row[1] for row in conn.execute("PRAGMA table_info(conversations)")
@@ -187,6 +189,7 @@ def test_unowned_legacy_records_are_preserved_without_assignment(tmp_path, monke
 def test_migration_refuses_to_overwrite_an_existing_legacy_table(tmp_path, monkeypatch):
     path = tmp_path / "conflict.db"
     monkeypatch.setattr(db, "DB_PATH", str(path))
+    monkeypatch.setenv("DATABASE_KEY", "test-database-key")
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT);
@@ -197,7 +200,7 @@ def test_migration_refuses_to_overwrite_an_existing_legacy_table(tmp_path, monke
     with pytest.raises(RuntimeError, match="legacy_messages already exists"):
         db.init_db()
 
-    conn = sqlite3.connect(path)
+    conn = db.get_connection()
     try:
         assert conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
@@ -207,6 +210,49 @@ def test_migration_refuses_to_overwrite_an_existing_legacy_table(tmp_path, monke
         ).fetchone()
     finally:
         conn.close()
+
+
+def test_plaintext_database_is_encrypted_and_data_is_preserved(
+    tmp_path, monkeypatch,
+):
+    path = tmp_path / "plaintext.db"
+    monkeypatch.setattr(db, "DB_PATH", str(path))
+    monkeypatch.setenv("DATABASE_KEY", "test's-database-key")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE private_data (content TEXT)")
+    conn.execute("INSERT INTO private_data VALUES ('preserved')")
+    conn.commit()
+    conn.close()
+
+    conn = db.get_connection()
+    try:
+        assert conn.execute(
+            "SELECT content FROM private_data"
+        ).fetchone()["content"] == "preserved"
+    finally:
+        conn.close()
+
+    with pytest.raises(sqlite3.DatabaseError):
+        sqlite3.connect(path).execute("SELECT * FROM sqlite_master").fetchall()
+
+
+def test_encrypted_database_rejects_a_different_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "encrypted.db"))
+    monkeypatch.setenv("DATABASE_KEY", "original-database-key")
+    db.init_db()
+    monkeypatch.setenv("DATABASE_KEY", "different-database-key")
+
+    with pytest.raises(RuntimeError, match="Could not open the database"):
+        db.get_connection()
+
+
+def test_database_requires_a_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "missing-key.db"))
+    monkeypatch.setattr(db, "ENV_PATH", tmp_path / "missing.env")
+    monkeypatch.delenv("DATABASE_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="Set DATABASE_KEY"):
+        db.get_connection()
 
 
 def test_list_conversations_rejects_invalid_limit(owners_db):

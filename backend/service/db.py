@@ -6,14 +6,112 @@ import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import time
+from pathlib import Path
+
+import sqlcipher3
+from dotenv import load_dotenv
+
 
 DB_PATH = "app.db"
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
+
+def _database_key() -> str:
+    load_dotenv(ENV_PATH)
+    key = os.getenv("DATABASE_KEY")
+    if not key:
+        raise RuntimeError("Set DATABASE_KEY before opening the database.")
+    return key
+
+
+def _apply_database_key(conn, key: str) -> None:
+    # Apply the SQLCipher encryption key and verify 
+    # it by attempting to read the database schema.
+    escaped_key = key.replace("'", "''")
+    conn.execute(f"PRAGMA key = '{escaped_key}'")
+    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+
+
+def _is_plaintext_database(path: str) -> bool:
+    # Check whether the database is a plaintext SQLite file.
+    # so we know if we are migrating encrypted or unencrypted database
+    try:
+        with open(path, "rb") as database_file:
+            return database_file.read(16) == b"SQLite format 3\x00"
+    except FileNotFoundError:
+        return False
+
+
+def _migrate_plaintext_database(path: str, key: str) -> None:
+    # use a temporary database to migrate our old database to newer one
+    path_obj = Path(path)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{path_obj.name}.",
+        suffix=".encrypted",
+        dir=path_obj.parent,
+    )
+    os.close(descriptor)
+    try:
+        conn = sqlcipher3.connect(temporary_path)
+        try:
+            _apply_database_key(conn, key)
+            conn.execute(
+                "ATTACH DATABASE ? AS plaintext KEY ''",
+                (str(path_obj.resolve()),),
+            )
+            conn.execute("SELECT sqlcipher_export('main', 'plaintext')").fetchone()
+            conn.execute("DETACH DATABASE plaintext")
+        finally:
+            conn.close()
+
+        conn = sqlcipher3.connect(temporary_path)
+        try:
+            _apply_database_key(conn, key)
+        finally:
+            conn.close()
+
+        source = sqlite3.connect(path)
+        try:
+            checkpoint = source.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
+            if checkpoint and checkpoint[0] != 0:
+                raise RuntimeError("Could not safely checkpoint the database.")
+        finally:
+            source.close()
+
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.unlink(str(path_obj) + suffix)
+            except FileNotFoundError:
+                pass
+        os.replace(temporary_path, path)
+    finally:
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            try:
+                os.unlink(temporary_path + suffix)
+            except FileNotFoundError:
+                pass
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    key = _database_key()
+    if _is_plaintext_database(DB_PATH):
+        _migrate_plaintext_database(DB_PATH, key)
+
+    conn = sqlcipher3.connect(DB_PATH)
+    try:
+        _apply_database_key(conn, key)
+    except sqlcipher3.DatabaseError as exc:
+        conn.close()
+        raise RuntimeError(
+            "Could not open the database with DATABASE_KEY; check the key "
+            "or database integrity."
+        ) from exc
+
+    conn.row_factory = sqlcipher3.Row
     conn.execute("PRAGMA foreign_keys = ON") # don't allow invalid user and CASCADE on delete functionality
     return conn
 
