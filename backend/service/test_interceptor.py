@@ -20,6 +20,13 @@ from backend.service.auth_interceptor import (
 def stub(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("DATABASE_KEY", "test-database-key")
+    # RPC tests need Qdrant too, but should remain independent of a developer's
+    # local Docker service or persisted vector data.
+    monkeypatch.setenv("QDRANT_URL", ":memory:")
+    monkeypatch.setenv(
+        "QDRANT_COLLECTION_PREFIX",
+        f"test_{tmp_path.name.replace('-', '_')}",
+    )
     db.init_db()
 
     with socket.socket() as sock:

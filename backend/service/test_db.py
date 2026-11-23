@@ -1,17 +1,26 @@
 """Database tests for user-owned data and legacy-data migration."""
 
 import sqlite3
+import struct
 
 import pytest
 
-from backend.embeddings import note_content_hash
+from backend.embeddings import embedding_model, note_content_hash
 import backend.service.db as db
+from backend.service import embedding_worker
 
 
 @pytest.fixture
 def owners_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("DATABASE_KEY", "test-database-key")
+    # Keep vector tests isolated and deterministic; no external Qdrant service
+    # is needed for database-level search and migration tests.
+    monkeypatch.setenv("QDRANT_URL", ":memory:")
+    monkeypatch.setenv(
+        "QDRANT_COLLECTION_PREFIX",
+        f"test_{tmp_path.name.replace('-', '_')}",
+    )
     db.init_db()
     user_a = db.register_user("alice", "correct-horse")
     user_b = db.register_user("bob", "another-horse")
@@ -61,9 +70,12 @@ def test_embedding_upsert_is_idempotent_and_requires_current_note_content(owners
     conn = db.get_connection()
     try:
         assert conn.execute(
-            "SELECT COUNT(*) FROM note_embeddings WHERE note_id = ?",
+            "SELECT COUNT(*) FROM note_embedding_index WHERE note_id = ?",
             (note_id,),
         ).fetchone()[0] == 1
+        assert "embedding" not in {
+            row[1] for row in conn.execute("PRAGMA table_info(note_embedding_index)")
+        }
         assert conn.execute(
             "SELECT COUNT(*) FROM note_embedding_jobs WHERE note_id = ?",
             (note_id,),
@@ -87,8 +99,13 @@ def test_note_updates_requeue_embeddings_and_clear_cascades_index(owners_db):
         note_content_hash("Draft", "old content"),
     )
 
-    assert db.update_note(user_a, note_id, "Final", "new content")
     assert not db.update_note(user_a + 1, note_id, "Private", "not owned")
+    assert [
+        row["id"]
+        for row in db.search_notes_hybrid(user_a, "", [1.0, 0.0], "test-model")
+    ] == [note_id]
+
+    assert db.update_note(user_a, note_id, "Final", "new content")
     jobs = db.get_pending_note_embeddings()
     assert [(job["id"], job["title"], job["content"]) for job in jobs] == [
         (note_id, "Final", "new content")
@@ -105,7 +122,7 @@ def test_note_updates_requeue_embeddings_and_clear_cascades_index(owners_db):
     conn = db.get_connection()
     try:
         assert conn.execute(
-            "SELECT COUNT(*) FROM note_embeddings WHERE note_id = ?",
+            "SELECT COUNT(*) FROM note_embedding_index WHERE note_id = ?",
             (note_id,),
         ).fetchone()[0] == 0
         assert conn.execute(
@@ -114,6 +131,7 @@ def test_note_updates_requeue_embeddings_and_clear_cascades_index(owners_db):
         ).fetchone()[0] == 0
     finally:
         conn.close()
+    assert db.search_notes_hybrid(user_a, "", [0.0, 1.0], "test-model") == []
 
 
 def test_hybrid_search_ranks_semantically_and_isolates_users(owners_db):
@@ -195,6 +213,73 @@ def test_clear_notes_deletes_only_the_owners_notes(owners_db):
     assert db.search_notes(user_a, "") == []
     assert [note["title"] for note in db.search_notes(user_b, "")] == ["Private"]
     assert db.clear_notes(user_a) == 0
+
+
+def test_legacy_sql_vectors_are_moved_to_qdrant_without_reembedding(
+    owners_db, monkeypatch,
+):
+    user_a, _ = owners_db
+    title, content = "Research", "renewable energy"
+    note_id = db.save_note(user_a, title, content)
+    conn = db.get_connection()
+    try:
+        conn.execute(
+            """CREATE TABLE note_embeddings (
+                   note_id INTEGER PRIMARY KEY,
+                   user_id INTEGER NOT NULL,
+                   model TEXT NOT NULL,
+                   dimensions INTEGER NOT NULL,
+                   embedding BLOB NOT NULL,
+                   content_hash TEXT NOT NULL,
+                   updated_at INTEGER NOT NULL
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO note_embeddings
+                   (note_id, user_id, model, dimensions, embedding,
+                    content_hash, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 0)""",
+            (
+                note_id,
+                user_a,
+                embedding_model(),
+                2,
+                struct.pack("<2f", 1.0, 0.0),
+                note_content_hash(title, content),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db.init_db()
+    worker = embedding_worker.NoteEmbeddingWorker()
+    original_upsert = db.upsert_note_embedding
+
+    def upsert_and_stop(*args):
+        indexed = original_upsert(*args)
+        worker._stop_event.set()
+        return indexed
+
+    monkeypatch.setattr(db, "upsert_note_embedding", upsert_and_stop)
+    monkeypatch.setattr(
+        embedding_worker,
+        "embed_text",
+        lambda *args, **kwargs: pytest.fail("legacy vector should be reused"),
+    )
+    worker._process_jobs(object())
+
+    results = db.search_notes_hybrid(
+        user_a, "", [1.0, 0.0], embedding_model()
+    )
+    assert [row["id"] for row in results] == [note_id]
+    conn = db.get_connection()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM note_embeddings_legacy"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_tasks_are_isolated_and_updates_check_owner(owners_db):

@@ -16,6 +16,7 @@ import sqlcipher3
 from dotenv import load_dotenv
 
 from backend.embeddings import embedding_model, note_content_hash
+from backend.service import note_vector_index
 
 
 DB_PATH = "app.db"
@@ -172,11 +173,13 @@ def _queue_note_embedding(
 
 
 def _reconcile_note_embedding_jobs(conn) -> None:
+    # Startup reconciliation queues notes whose model or content changed.
+    # This also covers notes that existed before the embedding job table.
     rows = conn.execute(
         """SELECT n.id, n.user_id, n.title, n.content,
                   e.model, e.content_hash
              FROM notes AS n
-             LEFT JOIN note_embeddings AS e ON e.note_id = n.id"""
+             LEFT JOIN note_embedding_index AS e ON e.note_id = n.id"""
     ).fetchall()
     current_model = embedding_model()
     for row in rows:
@@ -186,12 +189,17 @@ def _reconcile_note_embedding_jobs(conn) -> None:
             and row["content_hash"] == expected_hash
         ):
             continue
-        if row["model"] is not None:
-            conn.execute(
-                "DELETE FROM note_embeddings WHERE note_id = ?",
-                (row["id"],),
-            )
         _queue_note_embedding(conn, row["id"], row["user_id"], reset_attempts=False)
+    if _table_exists(conn, "note_embeddings_legacy"):
+        legacy_rows = conn.execute(
+            """SELECT e.note_id, e.user_id
+                 FROM note_embeddings_legacy AS e
+                 JOIN notes AS n ON n.id = e.note_id AND n.user_id = e.user_id"""
+        ).fetchall()
+        for row in legacy_rows:
+            _queue_note_embedding(
+                conn, row["note_id"], row["user_id"], reset_attempts=False
+            )
 
 
 def init_db():
@@ -251,15 +259,26 @@ def init_db():
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # Preserve the old SQLite vector table as a migration source. The
+            # worker copies its vectors into Qdrant, then removes them from here.
+            if _table_exists(conn, "note_embeddings"):
+                if _table_exists(conn, "note_embeddings_legacy"):
+                    raise RuntimeError(
+                        "Cannot migrate note_embeddings: "
+                        "note_embeddings_legacy already exists."
+                    )
+                conn.execute(
+                    "ALTER TABLE note_embeddings RENAME TO note_embeddings_legacy"
+                )
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS note_embeddings (
-                    note_id      INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
-                    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    model        TEXT NOT NULL,
-                    dimensions   INTEGER NOT NULL CHECK (dimensions > 0),
-                    embedding    BLOB NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    updated_at   INTEGER NOT NULL
+                CREATE TABLE IF NOT EXISTS note_embedding_index (
+                    note_id       INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+                    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    model         TEXT NOT NULL,
+                    dimensions    INTEGER NOT NULL CHECK (dimensions > 0),
+                    collection    TEXT NOT NULL,
+                    content_hash  TEXT NOT NULL,
+                    updated_at    INTEGER NOT NULL
                 )
             """)
             conn.execute("""
@@ -294,8 +313,8 @@ def init_db():
                 "ON notes(user_id, id)"
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_note_embeddings_user "
-                "ON note_embeddings(user_id, note_id)"
+                "CREATE INDEX IF NOT EXISTS idx_note_embedding_index_user "
+                "ON note_embedding_index(user_id, note_id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_note_embedding_jobs_due "
@@ -481,13 +500,32 @@ def update_note(user_id: int, note_id: int, title: str, content: str) -> bool:
     conn = get_connection()
     try:
         with conn:
+            # A content update invalidates the old point immediately and leaves
+            # re-indexing to the existing retry queue.
+            indexed = conn.execute(
+                """SELECT i.collection
+                     FROM note_embedding_index AS i
+                     JOIN notes AS n ON n.id = i.note_id
+                    WHERE i.note_id = ? AND n.user_id = ?""",
+                (note_id, user_id),
+            ).fetchone()
+            note = conn.execute(
+                "SELECT 1 FROM notes WHERE id = ? AND user_id = ?",
+                (note_id, user_id),
+            ).fetchone()
+            if note is None:
+                return False
+            if indexed is not None:
+                note_vector_index.delete_points(indexed["collection"], [note_id])
             updated = conn.execute(
                 "UPDATE notes SET title = ?, content = ? WHERE id = ? AND user_id = ?",
                 (title, content, note_id, user_id),
             )
             if not updated.rowcount:
                 return False
-            conn.execute("DELETE FROM note_embeddings WHERE note_id = ?", (note_id,))
+            conn.execute(
+                "DELETE FROM note_embedding_index WHERE note_id = ?", (note_id,)
+            )
             _queue_note_embedding(conn, note_id, user_id)
             return True
     finally:
@@ -557,6 +595,32 @@ def record_note_embedding_failure(note_id: int, error: str) -> None:
         conn.close()
 
 
+def get_legacy_note_embedding(note_id: int) -> dict | None:
+    # Read a legacy vector only for migration. It avoids re-calling Gemini
+    # when the stored model and content hash still match the current note.
+    conn = get_connection()
+    try:
+        if not _table_exists(conn, "note_embeddings_legacy"):
+            return None
+        row = conn.execute(
+            """SELECT model, dimensions, embedding, content_hash
+                 FROM note_embeddings_legacy WHERE note_id = ?""",
+            (note_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        dimensions = row["dimensions"]
+        if dimensions <= 0 or len(row["embedding"]) != dimensions * 4:
+            raise ValueError(f"Legacy embedding for note {note_id} is malformed.")
+        return {
+            "model": row["model"],
+            "embedding": list(struct.unpack(f"<{dimensions}f", row["embedding"])),
+            "content_hash": row["content_hash"],
+        }
+    finally:
+        conn.close()
+
+
 def _float_vector(values: list[float]) -> list[float]:
     try:
         vector = [float(value) for value in values]
@@ -578,14 +642,11 @@ def upsert_note_embedding(
     vector = _float_vector(embedding)
     if not model or not content_hash:
         raise ValueError("Embedding model and content hash are required.")
-    try:
-        packed = struct.pack(f"<{len(vector)}f", *vector)
-    except (OverflowError, struct.error) as exc:
-        raise ValueError("Embedding values exceed supported precision.") from exc
 
     conn = get_connection()
     try:
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             note = conn.execute(
                 "SELECT title, content FROM notes WHERE id = ? AND user_id = ?",
                 (note_id, user_id),
@@ -595,16 +656,31 @@ def upsert_note_embedding(
             ) != content_hash:
                 return False
 
+            # Qdrant is updated first, while SQL remains the stale-result and
+            # retry source of truth. The index reference is committed afterward.
+            collection = note_vector_index.upsert(
+                note_id=note_id,
+                user_id=user_id,
+                vector=vector,
+                model=model,
+                content_hash=content_hash,
+            )
+            previous = conn.execute(
+                "SELECT collection FROM note_embedding_index WHERE note_id = ?",
+                (note_id,),
+            ).fetchone()
+            if previous is not None and previous["collection"] != collection:
+                note_vector_index.delete_points(previous["collection"], [note_id])
             conn.execute(
-                """INSERT INTO note_embeddings
-                       (note_id, user_id, model, dimensions, embedding,
+                """INSERT INTO note_embedding_index
+                       (note_id, user_id, model, dimensions, collection,
                         content_hash, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(note_id) DO UPDATE SET
                        user_id = excluded.user_id,
                        model = excluded.model,
                        dimensions = excluded.dimensions,
-                       embedding = excluded.embedding,
+                       collection = excluded.collection,
                        content_hash = excluded.content_hash,
                        updated_at = excluded.updated_at""",
                 (
@@ -612,11 +688,16 @@ def upsert_note_embedding(
                     user_id,
                     model,
                     len(vector),
-                    packed,
+                    collection,
                     content_hash,
                     int(time.time()),
                 ),
             )
+            if _table_exists(conn, "note_embeddings_legacy"):
+                conn.execute(
+                    "DELETE FROM note_embeddings_legacy WHERE note_id = ?",
+                    (note_id,),
+                )
             conn.execute(
                 "DELETE FROM note_embedding_jobs WHERE note_id = ?",
                 (note_id,),
@@ -626,16 +707,6 @@ def upsert_note_embedding(
         conn.close()
 
 
-def _cosine_similarity(left: list[float], right: list[float]) -> float:
-    if len(left) != len(right):
-        raise ValueError("Embedding dimensions do not match.")
-    left_norm = math.sqrt(sum(value * value for value in left))
-    right_norm = math.sqrt(sum(value * value for value in right))
-    if not left_norm or not right_norm:
-        return 0.0
-    return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
-
-
 def search_notes_hybrid(
     user_id: int,
     keyword: str,
@@ -643,7 +714,7 @@ def search_notes_hybrid(
     model: str,
     limit: int = 20,
 ) -> list[dict]:
-    """Combine exact cosine similarity with the existing case-insensitive search."""
+    """Combine Qdrant similarity with the existing case-insensitive search."""
     query_vector = _float_vector(query_embedding)
     if not model:
         raise ValueError("Embedding model is required.")
@@ -652,42 +723,57 @@ def search_notes_hybrid(
 
     conn = get_connection()
     try:
-        keyword_ids = {
-            row["id"]
-            for row in conn.execute(
+        # Qdrant provides semantic candidates; SQLite adds exact keyword
+        # matches and then validates ownership, model, dimensions, and hash.
+        vector_matches = dict(
+            note_vector_index.search(
+                user_id=user_id,
+                vector=query_vector,
+                model=model,
+                limit=limit,
+            )
+        )
+        keyword_rows = (
+            conn.execute(
                 """SELECT id FROM notes
                      WHERE user_id = ? AND (title LIKE ? OR content LIKE ?)""",
                 (user_id, f"%{keyword}%", f"%{keyword}%"),
             ).fetchall()
+            if keyword
+            else []
+        )
+        keyword_ids = {
+            row["id"] for row in keyword_rows
         } if keyword else set()
+        candidate_ids = set(vector_matches) | keyword_ids
+        if not candidate_ids:
+            return []
+        placeholders = ",".join("?" for _ in candidate_ids)
         rows = conn.execute(
-            """SELECT n.id, n.title, n.content, n.created_at,
-                      e.embedding, e.dimensions
-                 FROM notes AS n
-                 LEFT JOIN note_embeddings AS e
-                   ON e.note_id = n.id
-                  AND e.user_id = n.user_id
-                  AND e.model = ?
-                WHERE n.user_id = ?""",
-            (model, user_id),
+            f"""SELECT id, title, content, created_at
+                  FROM notes
+                 WHERE user_id = ? AND id IN ({placeholders})""",
+            [user_id, *candidate_ids],
         ).fetchall()
-
+        indexed_rows = conn.execute(
+            f"""SELECT note_id, model, dimensions, content_hash
+                  FROM note_embedding_index
+                 WHERE user_id = ? AND note_id IN ({placeholders})""",
+            [user_id, *candidate_ids],
+        ).fetchall()
+        indexed_by_id = {row["note_id"]: row for row in indexed_rows}
         ranked = []
         for row in rows:
-            similarity = None
-            if row["embedding"] is not None:
-                dimensions = row["dimensions"]
-                if dimensions == len(query_vector) and len(row["embedding"]) == dimensions * 4:
-                    stored_vector = list(
-                        struct.unpack(f"<{dimensions}f", row["embedding"])
-                    )
-                    similarity = max(
-                        -1.0,
-                        min(
-                            1.0,
-                            _cosine_similarity(query_vector, stored_vector),
-                        ),
-                    )
+            index_entry = indexed_by_id.get(row["id"])
+            similarity = vector_matches.get(row["id"])
+            if (
+                index_entry is None
+                or index_entry["model"] != model
+                or index_entry["dimensions"] != len(query_vector)
+                or index_entry["content_hash"]
+                != note_content_hash(row["title"], row["content"])
+            ):
+                similarity = None
             is_keyword_match = row["id"] in keyword_ids
             if similarity is None and not is_keyword_match:
                 continue
@@ -714,6 +800,18 @@ def clear_notes(user_id: int) -> int:
     conn = get_connection()
     try:
         with conn:
+            # Remove Qdrant points before deleting the SQL note rows so each
+            # collection is cleaned only for the signed-in user's points.
+            indexed_rows = conn.execute(
+                """SELECT note_id, collection FROM note_embedding_index
+                     WHERE user_id = ?""",
+                (user_id,),
+            ).fetchall()
+            by_collection: dict[str, list[int]] = {}
+            for row in indexed_rows:
+                by_collection.setdefault(row["collection"], []).append(row["note_id"])
+            for collection, note_ids in by_collection.items():
+                note_vector_index.delete_points(collection, note_ids)
             cur = conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
             return cur.rowcount
     finally:

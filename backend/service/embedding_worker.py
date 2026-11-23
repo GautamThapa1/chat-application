@@ -66,12 +66,23 @@ class NoteEmbeddingWorker:
                 model = embedding_model()
                 content_hash = note_content_hash(job["title"], job["content"])
                 try:
-                    vector = embed_text(
-                        client,
-                        note_embedding_text(job["title"], job["content"]),
-                        task_type=DOCUMENT_TASK_TYPE,
-                        model=model,
-                    )
+                    # During migration, reuse a matching legacy SQLite vector
+                    # else use Qdrant
+                    # instead of spending an embedding API call unnecessarily.
+                    legacy = db.get_legacy_note_embedding(job["id"])
+                    if (
+                        legacy is not None
+                        and legacy["model"] == model
+                        and legacy["content_hash"] == content_hash
+                    ):
+                        vector = legacy["embedding"]
+                    else:
+                        vector = embed_text(
+                            client,
+                            note_embedding_text(job["title"], job["content"]),
+                            task_type=DOCUMENT_TASK_TYPE,
+                            model=model,
+                        )
                     indexed = db.upsert_note_embedding(
                         job["user_id"],
                         job["id"],

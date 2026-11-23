@@ -5,6 +5,12 @@ from backend.service import embedding_worker
 def _setup_database(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("DATABASE_KEY", "test-database-key")
+    # Worker tests use an isolated in-memory Qdrant instance.
+    monkeypatch.setenv("QDRANT_URL", ":memory:")
+    monkeypatch.setenv(
+        "QDRANT_COLLECTION_PREFIX",
+        f"test_{tmp_path.name.replace('-', '_')}",
+    )
     db.init_db()
     return db.register_user("alice", "correct-horse")
 
