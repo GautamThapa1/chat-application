@@ -66,7 +66,7 @@ app.add_exception_handler(
     _rate_limit_exceeded_handler
 )
 
-@app.middleware("http")  # HTTP only: WebSockets are not touched (step 3)
+@app.middleware("http")  # HTTP only: WebSockets are not touched
 async def default_rate_limit(request: Request, call_next):
     retry_after = default_limit_retry_after(get_remote_address(request))
     if retry_after is not None:

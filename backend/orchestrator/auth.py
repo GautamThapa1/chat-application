@@ -24,6 +24,7 @@ SESSION_MAX_AGE = 7 * 24 * 3600  # keep in step with the service's session TTL
 # set COOKIE_SECURE=true when you serve over TLS.
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
+# check which is trying to establish web connection before allowing it
 # Browsers attach an Origin header to WebSocket handshakes. Only pages served
 # from these origins may open a socket (blocks cross-site WebSocket hijacking).
 ALLOWED_ORIGINS = {
@@ -128,6 +129,7 @@ async def me(request: Request):
         raise HTTPException(status_code=401, detail="Not logged in.")
     return {"user_id": result.user_id}
 
+# this authenticate the websocket to see if it is allowed from the ALLOWED ORIGINS
 async def authenticate_websocket(ws: WebSocket) -> int | None:
     """Return the user_id for a handshake that may proceed, else None."""
     origin = ws.headers.get("origin")
