@@ -666,6 +666,29 @@ def delete_conversation(user_id: int, conversation_id: int) -> bool:
         conn.close()
 
 
+def conversation_title_from_message(message: str) -> str:
+    """Make a short sidebar title from the first user message."""
+    title = re.split(r"(?<=[.!?])\s+|\r?\n", message.strip(), maxsplit=1)[0]
+    title = title.strip(" \t\r\n.,!?;:-")
+    title = re.sub(
+        r"^(?:please\s+)?(?:can you help me|could you help me|can you|could you|"
+        r"help me|remember that|i want to|i need to)\s+",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if not title:
+        return "New chat"
+
+    # Keep a whole-word title where possible so sidebar labels stay readable.
+    if len(title) > 48:
+        shortened = title[:48]
+        if " " in shortened:
+            shortened = shortened.rsplit(" ", 1)[0]
+        title = shortened.rstrip(" ,.:;!?")
+    return title[0].upper() + title[1:]
+
+
 def save_conversation(
     user_id: int,
     conversation_id: int,
@@ -711,9 +734,8 @@ def save_conversation(
             )
             title = conversation["title"]
             if title == "New chat":
-                first_line = user_content.strip().splitlines()
-                if first_line:
-                    title = first_line[0][:80]
+                # Set the title once, from the first user message only.
+                title = conversation_title_from_message(user_content)
             conn.execute(
                 """UPDATE conversations
                       SET title = ?, updated_at = CURRENT_TIMESTAMP
@@ -1587,6 +1609,24 @@ def get_session_user(token: str) -> int | None:
     finally:
         conn.close()
     return row["user_id"] if row else None
+
+
+def get_session_username(token: str) -> str | None:
+    """Return the username for a valid session without exposing session tokens."""
+    if not token:
+        return None
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """SELECT u.username
+                 FROM sessions AS s
+                 JOIN users AS u ON u.id = s.user_id
+                WHERE s.token_hash = ? AND s.expires_at > ?""",
+            (_hash_token(token), int(time.time())),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["username"] if row else None
 
 
 def delete_session(token: str) -> None:

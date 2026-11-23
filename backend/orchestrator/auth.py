@@ -127,7 +127,7 @@ async def me(request: Request):
         raise _http_error(exc) from exc
     if not result.valid:
         raise HTTPException(status_code=401, detail="Not logged in.")
-    return {"user_id": result.user_id}
+    return {"user_id": result.user_id, "username": result.username}
 
 # this authenticate the websocket to see if it is allowed from the ALLOWED ORIGINS
 async def authenticate_websocket(ws: WebSocket) -> int | None:

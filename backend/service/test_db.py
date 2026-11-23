@@ -96,6 +96,27 @@ def test_regenerate_context_and_assistant_replacement(owners_db):
     assert remaining[-1]["content"] == "New answer"
 
 
+def test_first_user_message_sets_a_short_relevant_conversation_title(owners_db):
+    user_a, _ = owners_db
+    conversation = db.create_conversation(user_a)
+
+    db.save_conversation(
+        user_a,
+        conversation["id"],
+        "Could you help me plan a weekend trip to Pokhara? Include hiking.",
+        "Sure, let's plan it.",
+    )
+    db.save_conversation(
+        user_a,
+        conversation["id"],
+        "Also suggest restaurants.",
+        "Here are some options.",
+    )
+
+    rows, _ = db.list_conversations(user_a)
+    assert rows[0]["title"] == "Plan a weekend trip to Pokhara"
+
+
 def test_notes_are_isolated_by_owner(owners_db):
     user_a, user_b = owners_db
     note_id = db.save_note(user_a, "Grocery", "milk, eggs, bread")

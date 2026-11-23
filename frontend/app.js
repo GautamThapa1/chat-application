@@ -17,6 +17,7 @@ const loadMoreConversationsEl = document.getElementById(
 
 const chatEl = document.getElementById("chat");
 const authEl = document.getElementById("auth");
+const userNameEl = document.getElementById("user-name");
 const authFormEl = document.getElementById("auth-form");
 const authTitleEl = document.getElementById("auth-title");
 const authUsernameEl = document.getElementById("auth-username");
@@ -114,8 +115,15 @@ function clearUserState() {
   conversationTotalCount = 0;
   conversationsLoading = false;
   activeConversationId = null;
+  setCurrentUserName("");
   renderConversations();
   resetChat();
+}
+
+function setCurrentUserName(username) {
+  if (userNameEl) {
+    userNameEl.textContent = username || "Guest";
+  }
 }
 
 function showAuth(message = "") {
@@ -184,6 +192,7 @@ authFormEl.addEventListener("submit", async (e) => {
     clearUserState();
     setAuthMode("login");
     showChat();
+    setCurrentUserName(username);
     await loadConversations();
   } catch {
     authErrorEl.textContent = "Could not reach the server.";
@@ -212,6 +221,7 @@ async function checkSession() {
     const me = await api("/api/me");
     if (me.ok) {
       clearUserState();
+      setCurrentUserName(me.data.username);
       showChat();
       await loadConversations();
     } else if (me.status === 401) {
@@ -225,7 +235,6 @@ async function checkSession() {
 }
 
 async function loadConversations() {
-  clearUserState();
   const generation = userStateGeneration;
   try {
     const result = await api(

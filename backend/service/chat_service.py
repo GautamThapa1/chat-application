@@ -55,7 +55,9 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
     def ValidateSession(self, request, context):
         user_id = db.get_session_user(request.session_token)
         return chat_pb2.ValidateSessionResponse(
-            valid=user_id is not None, user_id=user_id or 0
+            valid=user_id is not None,
+            user_id=user_id or 0,
+            username=db.get_session_username(request.session_token) or "",
         )
 
     def SaveConversation(self, request, context):

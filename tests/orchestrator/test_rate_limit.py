@@ -49,6 +49,18 @@ def test_register_blocks_the_sixth_attempt(client):
         assert client.post("/api/register", json=body).status_code == 201
     assert client.post("/api/register", json=body).status_code == 429
 
+
+def test_me_returns_the_authenticated_username(client):
+    client.cookies.set("session", "valid-session")
+    client.app.state.grpc_stub.ValidateSession = AsyncMock(
+        return_value=MagicMock(valid=True, user_id=7, username="alice")
+    )
+
+    response = client.get("/api/me")
+
+    assert response.status_code == 200
+    assert response.json() == {"user_id": 7, "username": "alice"}
+
 @pytest.fixture
 def app_client():
     """The real app from main.py, so we test its actual wiring."""
