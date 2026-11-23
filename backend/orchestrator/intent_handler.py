@@ -79,7 +79,7 @@ async def classify_message(
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
             response_mime_type="application/json",
-            response_schema=INTENT_SCHEMA,
+            response_schema=INTENT_SCHEMA, 
         ),
     )
 
