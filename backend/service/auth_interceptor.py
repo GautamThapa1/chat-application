@@ -38,11 +38,13 @@ def _deny_handler(code: grpc.StatusCode, message: str):
 
 class AuthInterceptor(grpc.ServerInterceptor):
     def intercept_service(self, continuation, handler_call_details):
-        handler = continuation(handler_call_details)
+        handler = continuation(handler_call_details) # checks what kind of method is being invoked
 
         if handler is None or handler_call_details.method in PUBLIC_METHODS:
             return handler
 
+        # since we implemented uranry RPC, we don't allow streaming of messages
+        # from one call/method
         if handler.request_streaming or handler.response_streaming:
             # Fail closed: refuse what we have not taught the interceptor yet.
             return _deny_handler(
