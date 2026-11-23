@@ -54,11 +54,10 @@ async def test_normal_chat_returns_to_streaming_path():
 
 
 def test_native_tools_declare_all_supported_operations():
-    assert {
-        declaration.name
-        for declaration in TOOL_CONFIG.tools[0].function_declarations
-    } == {
+    declarations = TOOL_CONFIG.tools[0].function_declarations
+    assert {declaration.name for declaration in declarations} == {
         "save_note",
+        "update_note",
         "search_notes",
         "list_notes",
         "clear_notes",
@@ -66,6 +65,10 @@ def test_native_tools_declare_all_supported_operations():
         "list_tasks",
         "complete_task",
     }
+    assert all(
+        declaration.parameters.additional_properties is None
+        for declaration in declarations
+    )
 
 
 @pytest.mark.asyncio
@@ -90,6 +93,100 @@ async def test_save_note_dispatch_validates_and_maps_arguments():
     assert result.response == {"note_id": 4, "title": "Meeting"}
     request = stub.SaveNote.await_args.args[0]
     assert (request.title, request.content) == ("Meeting", "Discuss launch")
+
+
+@pytest.mark.asyncio
+async def test_update_note_dispatch_maps_to_owner_checked_rpc():
+    stub = SimpleNamespace(
+        UpdateNote=AsyncMock(
+            return_value=SimpleNamespace(
+                note=SimpleNamespace(id=12, title="Updated")
+            )
+        )
+    )
+
+    result = await dispatch_tool_call(
+        "update_note",
+        {"note_id": 12, "title": " Updated ", "content": " Revised "},
+        stub,
+        user_message="Edit my note",
+        history=[],
+        confirmation_token="unused",
+    )
+
+    request = stub.UpdateNote.await_args.args[0]
+    assert (request.note_id, request.title, request.content) == (
+        12,
+        "Updated",
+        "Revised",
+    )
+    assert result.response == {"note_id": 12, "title": "Updated"}
+
+
+@pytest.mark.asyncio
+async def test_search_notes_uses_semantic_rpc_and_query_embeddings():
+    note = SimpleNamespace(
+        id=1, title="Garden", content="Grow tomatoes", created_at=""
+    )
+    gemini_client = SimpleNamespace(
+        models=SimpleNamespace(
+            embed_content=AsyncMock(
+                return_value=SimpleNamespace(
+                    embeddings=[SimpleNamespace(values=[1.0, 0.0])]
+                )
+            )
+        )
+    )
+    stub = SimpleNamespace(
+        SearchNotesHybrid=AsyncMock(
+            return_value=SimpleNamespace(notes=[note])
+        ),
+        SearchNotes=AsyncMock(),
+    )
+
+    result = await dispatch_tool_call(
+        "search_notes",
+        {"keyword": "garden ideas"},
+        stub,
+        user_message="Find garden ideas",
+        history=[],
+        confirmation_token="unused",
+        gemini_client=gemini_client,
+    )
+
+    request = stub.SearchNotesHybrid.await_args.args[0]
+    assert request.keyword == "garden ideas"
+    assert list(request.embedding) == [1.0, 0.0]
+    assert result.response["notes"][0]["title"] == "Garden"
+    stub.SearchNotes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_search_notes_falls_back_when_query_embedding_fails():
+    note = SimpleNamespace(
+        id=2, title="Garden", content="Tomatoes", created_at=""
+    )
+    gemini_client = SimpleNamespace(
+        models=SimpleNamespace(
+            embed_content=AsyncMock(side_effect=RuntimeError("offline"))
+        )
+    )
+    stub = SimpleNamespace(
+        SearchNotes=AsyncMock(return_value=SimpleNamespace(notes=[note]))
+    )
+
+    result = await dispatch_tool_call(
+        "search_notes",
+        {"keyword": "garden"},
+        stub,
+        user_message="Find garden",
+        history=[],
+        confirmation_token="unused",
+        gemini_client=gemini_client,
+    )
+
+    assert result.response["notes"][0]["id"] == 2
+    stub.SearchNotes.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -184,6 +281,7 @@ async def test_task_tools_dispatch_to_the_existing_grpc_methods():
     ("name", "arguments"),
     [
         ("save_note", {"title": "Only title"}),
+        ("update_note", {"note_id": True, "title": "x", "content": "y"}),
         ("search_notes", {"keyword": "  "}),
         ("complete_task", {"task_id": True}),
         ("list_tasks", {"unexpected": True}),
@@ -257,7 +355,7 @@ async def test_multiple_tool_calls_are_executed_and_results_returned_to_gemini()
     assert stub.ListTasks.await_count == 1
     second_request = client.models.generate_content.await_args_list[1].kwargs
     function_responses = second_request["contents"][-1]
-    assert function_responses.role == "tool"
+    assert function_responses.role == "user"
     assert [part.function_response.name for part in function_responses.parts] == [
         "save_note",
         "list_tasks",

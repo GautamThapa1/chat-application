@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from backend.embeddings import note_content_hash
 import backend.service.db as db
 
 
@@ -24,6 +25,152 @@ def test_notes_are_isolated_by_owner(owners_db):
     assert note_id > 0
     assert db.search_notes(user_a, "milk")[0]["title"] == "Grocery"
     assert db.search_notes(user_b, "milk") == []
+
+
+def test_missing_note_embeddings_are_backfilled_idempotently(owners_db):
+    user_a, _ = owners_db
+    note_id = db.save_note(user_a, "Research", "renewable energy")
+    conn = db.get_connection()
+    try:
+        conn.execute(
+            "DELETE FROM note_embedding_jobs WHERE note_id = ?",
+            (note_id,),
+        )
+    finally:
+        conn.close()
+
+    db.init_db()
+    db.init_db()
+
+    jobs = db.get_pending_note_embeddings()
+    assert [job["id"] for job in jobs] == [note_id]
+
+
+def test_embedding_upsert_is_idempotent_and_requires_current_note_content(owners_db):
+    user_a, _ = owners_db
+    note_id = db.save_note(user_a, "Research", "renewable energy")
+    content_hash = note_content_hash("Research", "renewable energy")
+
+    assert db.upsert_note_embedding(
+        user_a, note_id, [1.0, 0.0], "test-model", content_hash
+    )
+    assert db.upsert_note_embedding(
+        user_a, note_id, [0.8, 0.2], "test-model", content_hash
+    )
+
+    conn = db.get_connection()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM note_embeddings WHERE note_id = ?",
+            (note_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM note_embedding_jobs WHERE note_id = ?",
+            (note_id,),
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    assert not db.upsert_note_embedding(
+        user_a, note_id, [1.0, 0.0], "test-model", "stale-content"
+    )
+
+
+def test_note_updates_requeue_embeddings_and_clear_cascades_index(owners_db):
+    user_a, _ = owners_db
+    note_id = db.save_note(user_a, "Draft", "old content")
+    assert db.upsert_note_embedding(
+        user_a,
+        note_id,
+        [1.0, 0.0],
+        "test-model",
+        note_content_hash("Draft", "old content"),
+    )
+
+    assert db.update_note(user_a, note_id, "Final", "new content")
+    assert not db.update_note(user_a + 1, note_id, "Private", "not owned")
+    jobs = db.get_pending_note_embeddings()
+    assert [(job["id"], job["title"], job["content"]) for job in jobs] == [
+        (note_id, "Final", "new content")
+    ]
+
+    assert db.upsert_note_embedding(
+        user_a,
+        note_id,
+        [0.0, 1.0],
+        "test-model",
+        note_content_hash("Final", "new content"),
+    )
+    assert db.clear_notes(user_a) == 1
+    conn = db.get_connection()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM note_embeddings WHERE note_id = ?",
+            (note_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM note_embedding_jobs WHERE note_id = ?",
+            (note_id,),
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_hybrid_search_ranks_semantically_and_isolates_users(owners_db):
+    user_a, user_b = owners_db
+    relevant_id = db.save_note(user_a, "Garden", "How to grow tomatoes")
+    unrelated_id = db.save_note(user_a, "Travel", "Packing for a trip")
+    private_id = db.save_note(user_b, "Private garden", "tomato plan")
+    for user_id, note_id, title, content, vector in [
+        (user_a, relevant_id, "Garden", "How to grow tomatoes", [1.0, 0.0]),
+        (user_a, unrelated_id, "Travel", "Packing for a trip", [0.0, 1.0]),
+        (user_b, private_id, "Private garden", "tomato plan", [1.0, 0.0]),
+    ]:
+        assert db.upsert_note_embedding(
+            user_id,
+            note_id,
+            vector,
+            "test-model",
+            note_content_hash(title, content),
+        )
+
+    results = db.search_notes_hybrid(
+        user_a, "", [1.0, 0.0], "test-model"
+    )
+    assert [note["id"] for note in results] == [relevant_id, unrelated_id]
+    assert private_id not in {note["id"] for note in results}
+
+
+def test_embedding_failures_are_scheduled_for_retry_without_losing_note(owners_db):
+    user_a, _ = owners_db
+    note_id = db.save_note(user_a, "Persistent", "saved before embedding")
+
+    db.record_note_embedding_failure(note_id, "temporary API failure")
+
+    conn = db.get_connection()
+    try:
+        job = conn.execute(
+            "SELECT attempts, next_attempt_at, last_error "
+            "FROM note_embedding_jobs WHERE note_id = ?",
+            (note_id,),
+        ).fetchone()
+        assert job["attempts"] == 1
+        assert job["next_attempt_at"] > 0
+        assert job["last_error"] == "temporary API failure"
+    finally:
+        conn.close()
+    assert db.search_notes(user_a, "saved before embedding")[0]["id"] == note_id
+    assert db.get_pending_note_embeddings() == []
+    conn = db.get_connection()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE note_embedding_jobs SET next_attempt_at = 0 WHERE note_id = ?",
+                (note_id,),
+            )
+    finally:
+        conn.close()
+    assert [job["id"] for job in db.get_pending_note_embeddings()] == [note_id]
 
 
 def test_search_notes_is_case_insensitive_and_owner_scoped(owners_db):

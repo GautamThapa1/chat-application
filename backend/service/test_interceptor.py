@@ -5,6 +5,7 @@ import socket
 import grpc
 import pytest
 
+from backend.embeddings import note_content_hash
 import backend.service.db as db
 from backend.generated import chat_pb2, chat_pb2_grpc
 from backend.service import auth_interceptor, chat_service
@@ -202,6 +203,61 @@ def test_conversations_notes_and_tasks_are_isolated(stub):
     ).tasks[0].id == task.task.id
 
 
+def test_note_embedding_rpcs_enforce_owner_and_support_semantic_search(stub):
+    stub.Register(
+        chat_pb2.RegisterRequest(username="alice", password="correct-horse")
+    )
+    stub.Register(
+        chat_pb2.RegisterRequest(username="bob", password="another-horse")
+    )
+    token_a = stub.Login(
+        chat_pb2.LoginRequest(username="alice", password="correct-horse")
+    ).session_token
+    token_b = stub.Login(
+        chat_pb2.LoginRequest(username="bob", password="another-horse")
+    ).session_token
+    metadata_a = ((SESSION_METADATA_KEY, token_a),)
+    metadata_b = ((SESSION_METADATA_KEY, token_b),)
+    note = stub.SaveNote(
+        chat_pb2.SaveNoteRequest(title="Garden", content="Grow tomatoes"),
+        metadata=metadata_a,
+    ).note
+
+    with pytest.raises(grpc.RpcError) as update_error:
+        stub.UpdateNote(
+            chat_pb2.UpdateNoteRequest(
+                note_id=note.id,
+                title="Stolen",
+                content="Private",
+            ),
+            metadata=metadata_b,
+        )
+    assert update_error.value.code() == grpc.StatusCode.NOT_FOUND
+
+    request = chat_pb2.UpsertNoteEmbeddingRequest(
+        note_id=note.id,
+        embedding=[1.0, 0.0],
+        embedding_model="test-model",
+        content_hash=note_content_hash("Garden", "Grow tomatoes"),
+    )
+    assert not stub.UpsertNoteEmbedding(request, metadata=metadata_b).indexed
+    assert not stub.SearchNotesHybrid(
+        chat_pb2.SearchNotesHybridRequest(
+            embedding=[1.0, 0.0],
+            embedding_model="test-model",
+        ),
+        metadata=metadata_b,
+    ).notes
+    assert stub.UpsertNoteEmbedding(request, metadata=metadata_a).indexed
+    assert stub.SearchNotesHybrid(
+        chat_pb2.SearchNotesHybridRequest(
+            embedding=[1.0, 0.0],
+            embedding_model="test-model",
+        ),
+        metadata=metadata_a,
+    ).notes[0].id == note.id
+
+
 def test_conversation_endpoints_require_a_valid_session(stub):
     with pytest.raises(grpc.RpcError) as missing:
         stub.ListConversations(chat_pb2.ListConversationsRequest())
@@ -266,4 +322,5 @@ def test_handler_can_see_authenticated_user_id(tmp_path, monkeypatch):
 
 def test_unknown_methods_are_protected_by_default():
     assert "/chat.ChatService/SaveNote" not in auth_interceptor.PUBLIC_METHODS
+    assert "/chat.ChatService/SearchNotesHybrid" not in auth_interceptor.PUBLIC_METHODS
     assert "/chat.ChatService/ListTasks" not in auth_interceptor.PUBLIC_METHODS
