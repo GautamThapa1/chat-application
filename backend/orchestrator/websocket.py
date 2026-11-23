@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 
 import grpc
 from fastapi import WebSocket, WebSocketDisconnect
@@ -124,6 +125,7 @@ async def websocket_endpoint(
     model: str,
     *,
     user_id: int,
+    revalidate_session: Callable[[], Awaitable[int | None]] | None = None,
 ) -> None:
     await websocket.accept()
     log.info("WebSocket connected")
@@ -133,6 +135,18 @@ async def websocket_endpoint(
     try:
         while True:
             raw_message = await websocket.receive_text()
+
+            # re-validate session on every message so expired websocket doesn't let it through
+            if revalidate_session is not None:
+                try:
+                    current_user_id = await revalidate_session()
+                except Exception:
+                    log.exception("Session revalidation failed")
+                    current_user_id = None
+                if current_user_id is None or current_user_id != user_id:
+                    log.warning("WebSocket session is invalid; closing connection")
+                    await websocket.close(code=1008)
+                    return
 
             # Parse the incoming message.
             try:

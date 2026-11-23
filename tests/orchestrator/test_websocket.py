@@ -17,6 +17,7 @@ class FakeWebSocket:
     def __init__(self, messages):
         self.messages = list(messages)
         self.sent_messages = []
+        self.close_codes = []
         self.accepted = False
 
     async def accept(self):
@@ -34,6 +35,9 @@ class FakeWebSocket:
     async def send_json(self, data):
         self.sent_messages.append(data)
 
+    async def close(self, code=1000):
+        self.close_codes.append(code)
+
 
 def create_message(content, request_id="request-1", conversation_id=3):
     return json.dumps({
@@ -48,6 +52,47 @@ def fake_stub(messages=()):
     return SimpleNamespace(
         GetConversation=AsyncMock(return_value=SimpleNamespace(messages=messages))
     )
+
+
+@pytest.mark.asyncio
+async def test_websocket_revalidates_session_on_each_message():
+    websocket = FakeWebSocket([create_message("Hello")])
+    revalidations = 0
+
+    async def revalidate_session():
+        nonlocal revalidations
+        revalidations += 1
+        return 1
+
+    await websocket_module.websocket_endpoint(
+        websocket,
+        fake_stub(),
+        object(),
+        "test-model",
+        user_id=1,
+        revalidate_session=revalidate_session,
+    )
+
+    assert revalidations == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_session_closes_websocket():
+    websocket = FakeWebSocket([create_message("Hello")])
+
+    async def revalidate_session():
+        return None
+
+    await websocket_module.websocket_endpoint(
+        websocket,
+        fake_stub(),
+        object(),
+        "test-model",
+        user_id=1,
+        revalidate_session=revalidate_session,
+    )
+
+    assert websocket.close_codes == [1008]
 
 
 @pytest.mark.asyncio

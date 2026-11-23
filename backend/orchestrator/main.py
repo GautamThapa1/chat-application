@@ -95,6 +95,7 @@ async def ws_chat(ws: WebSocket):
         ws.app.state.gemini_client,
         ws.app.state.gemini_model,
         user_id=user_id,
+        revalidate_session=lambda: auth.authenticate_websocket(ws),
     )
 
 app.include_router(auth.router)  # must come BEFORE the "/" static mount
