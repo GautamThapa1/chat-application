@@ -65,8 +65,13 @@ Create a `.env` file in the project root:
 ```env
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3.5-flash-lite
+GEMINI_MAX_INPUT_TOKENS=24000
 DATABASE_KEY=your_long_random_database_key
 ```
+
+Chat history is trimmed to the newest complete turns that fit this input-token
+budget. The current message is included in the count; messages exceeding the
+budget are rejected. The default budget is `24000`.
 
 `DATABASE_KEY` encrypts the SQLite database with SQLCipher. Keep it secret and
 back it up securely: the database cannot be opened if the key is lost. On first
