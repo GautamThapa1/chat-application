@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import json
 import math
 import os
 import re
@@ -118,6 +119,7 @@ def get_connection():
 
     conn.row_factory = sqlcipher3.Row
     conn.execute("PRAGMA foreign_keys = ON") # don't allow invalid user and CASCADE on delete functionality
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -150,9 +152,21 @@ def _queue_note_embedding(
     conn,
     note_id: int,
     user_id: int,
+    title: str,
+    content: str,
     *,
     reset_attempts: bool = True,
 ) -> None:
+    model = embedding_model()
+    content_hash = note_content_hash(title, content)
+    # A persistent dedupe key makes worker restarts and duplicate queue calls
+    # converge on the same note/model/content combination.
+    conn.execute(
+        """INSERT OR IGNORE INTO note_embedding_dedupe
+               (note_id, content_hash, model)
+           VALUES (?, ?, ?)""",
+        (note_id, content_hash, model),
+    )
     if reset_attempts:
         conn.execute(
             """INSERT INTO note_embedding_jobs (note_id, user_id)
@@ -189,16 +203,28 @@ def _reconcile_note_embedding_jobs(conn) -> None:
             and row["content_hash"] == expected_hash
         ):
             continue
-        _queue_note_embedding(conn, row["id"], row["user_id"], reset_attempts=False)
+        _queue_note_embedding(
+            conn,
+            row["id"],
+            row["user_id"],
+            row["title"],
+            row["content"],
+            reset_attempts=False,
+        )
     if _table_exists(conn, "note_embeddings_legacy"):
         legacy_rows = conn.execute(
-            """SELECT e.note_id, e.user_id
+            """SELECT e.note_id, e.user_id, n.title, n.content
                  FROM note_embeddings_legacy AS e
                  JOIN notes AS n ON n.id = e.note_id AND n.user_id = e.user_id"""
         ).fetchall()
         for row in legacy_rows:
             _queue_note_embedding(
-                conn, row["note_id"], row["user_id"], reset_attempts=False
+                conn,
+                row["note_id"],
+                row["user_id"],
+                row["title"],
+                row["content"],
+                reset_attempts=False,
             )
 
 
@@ -207,6 +233,25 @@ def init_db():
     try:
         conn.execute("BEGIN IMMEDIATE")
         with conn:
+            # Idempotency records survive crashes and provide the original
+            # response for retries. The processing lease lets a crashed owner
+            # be recovered without allowing concurrent owners to mutate twice.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS api_idempotency (
+                    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    idempotency_key TEXT NOT NULL,
+                    operation     TEXT NOT NULL,
+                    payload_hash  TEXT NOT NULL,
+                    status        TEXT NOT NULL CHECK (
+                        status IN ('processing', 'completed')
+                    ),
+                    response_json TEXT,
+                    lease_until   INTEGER NOT NULL DEFAULT 0,
+                    created_at    INTEGER NOT NULL,
+                    updated_at    INTEGER NOT NULL,
+                    PRIMARY KEY (user_id, idempotency_key)
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,7 +332,28 @@ def init_db():
                     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     attempts        INTEGER NOT NULL DEFAULT 0,
                     next_attempt_at INTEGER NOT NULL DEFAULT 0,
-                    last_error      TEXT
+                    last_error      TEXT,
+                    lease_owner     TEXT,
+                    lease_until     INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            job_columns = _table_columns(conn, "note_embedding_jobs")
+            if "lease_owner" not in job_columns:
+                conn.execute(
+                    "ALTER TABLE note_embedding_jobs ADD COLUMN lease_owner TEXT"
+                )
+            if "lease_until" not in job_columns:
+                conn.execute(
+                    "ALTER TABLE note_embedding_jobs "
+                    "ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0"
+                )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS note_embedding_dedupe (
+                    note_id       INTEGER NOT NULL,
+                    content_hash  TEXT NOT NULL,
+                    model         TEXT NOT NULL,
+                    PRIMARY KEY (note_id, content_hash, model),
+                    FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
                 )
             """)
             conn.execute("""
@@ -479,6 +545,131 @@ def save_conversation(
 # --------------------------------------------------------------------------- #
 # Notes
 # --------------------------------------------------------------------------- #
+class IdempotencyConflict(ValueError):
+    """Raised when an idempotency key is reused for a different request."""
+
+
+class IdempotencyInProgress(TimeoutError):
+    """Raised when a concurrent request owns the processing lease."""
+
+
+def _payload_hash(payload: dict) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def run_idempotent_request(
+    user_id: int,
+    idempotency_key: str,
+    operation: str,
+    payload: dict,
+    execute,
+) -> dict:
+    """Run a mutation once per user/key pair and persist its original result.
+
+    A processing row is claimed atomically. A crash leaves it recoverable after
+    the short lease expires; concurrent callers wait for completion instead of
+    running the mutation twice.
+    """
+    if not idempotency_key:
+        return execute(None)
+
+    key = idempotency_key.strip()
+    if not key or len(key) > 128:
+        raise ValueError("Idempotency key must contain 1 to 128 characters.")
+
+    payload_hash = _payload_hash(payload)
+    now = int(time.time())
+    lease_until = now + 30
+
+    for _ in range(100):
+        conn = get_connection()
+        try:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """SELECT operation, payload_hash, status,
+                              response_json, lease_until
+                         FROM api_idempotency
+                        WHERE user_id = ? AND idempotency_key = ?""",
+                    (user_id, key),
+                ).fetchone()
+
+                if row is not None:
+                    if row["operation"] != operation or row["payload_hash"] != payload_hash:
+                        raise IdempotencyConflict(
+                            "Idempotency key is already used for a different operation or payload."
+                        )
+                    if row["status"] == "completed":
+                        return json.loads(row["response_json"])
+
+                    if row["lease_until"] > now:
+                        conn.rollback()
+                        should_wait = True
+                        can_execute = False
+                    else:
+                        conn.execute(
+                            """UPDATE api_idempotency
+                                  SET lease_until = ?, updated_at = ?
+                                WHERE user_id = ? AND idempotency_key = ?""",
+                            (lease_until, now, user_id, key),
+                        )
+                        should_wait = False
+                        can_execute = True
+                else:
+                    conn.execute(
+                        """INSERT INTO api_idempotency
+                               (user_id, idempotency_key, operation, payload_hash,
+                                status, response_json, lease_until, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, 'processing', NULL, ?, ?, ?)""",
+                        (user_id, key, operation, payload_hash,
+                         lease_until, now, now),
+                    )
+                    should_wait = False
+                    can_execute = True
+
+                if not can_execute:
+                    pass
+                else:
+                    try:
+                        response = execute(conn)
+                        if not isinstance(response, dict):
+                            raise TypeError(
+                                "Idempotent mutation responses must be dictionaries."
+                            )
+                        conn.execute(
+                            """UPDATE api_idempotency
+                                  SET status = 'completed',
+                                      response_json = ?,
+                                      lease_until = 0,
+                                      updated_at = ?
+                                WHERE user_id = ? AND idempotency_key = ?""",
+                            (json.dumps(response, sort_keys=True),
+                             int(time.time()), user_id, key),
+                        )
+                        return response
+                    except Exception:
+                        conn.execute(
+                            """UPDATE api_idempotency
+                                  SET lease_until = 0, updated_at = ?
+                                WHERE user_id = ? AND idempotency_key = ?""",
+                            (int(time.time()), user_id, key),
+                        )
+                        conn.commit()
+                        raise
+        finally:
+            conn.close()
+
+        if should_wait:
+            time.sleep(0.05)
+            now = int(time.time())
+            continue
+
+    raise IdempotencyInProgress(
+        "The same idempotent request is still being processed."
+    )
+
+
 def save_note(user_id: int, title: str, content: str) -> int:
     """Insert a note and return its id."""
     conn = get_connection()
@@ -489,10 +680,52 @@ def save_note(user_id: int, title: str, content: str) -> int:
                 (user_id, title, content),
             )
             note_id = cur.lastrowid
-            _queue_note_embedding(conn, note_id, user_id)
+            _queue_note_embedding(conn, note_id, user_id, title, content)
             return note_id
     finally:
         conn.close()
+
+
+def save_note_idempotent(
+    user_id: int,
+    title: str,
+    content: str,
+    idempotency_key: str,
+) -> dict:
+    # The payload hash is part of the key claim, preventing accidental reuse
+    # for a different note while preserving the exact first response.
+    return run_idempotent_request(
+        user_id,
+        idempotency_key,
+        "save_note",
+        {"title": title, "content": content},
+        lambda conn: save_note_idempotent_in_transaction(
+            conn, user_id, title, content
+        ),
+    )
+
+
+def save_note_idempotent_in_transaction(conn, user_id, title, content) -> dict:
+    if conn is None:
+        note_id = save_note(user_id, title, content)
+        return {
+            "id": note_id,
+            "title": title,
+            "content": content,
+            "created_at": "",
+        }
+    cur = conn.execute(
+        "INSERT INTO notes (user_id, title, content) VALUES (?, ?, ?)",
+        (user_id, title, content),
+    )
+    note_id = cur.lastrowid
+    _queue_note_embedding(conn, note_id, user_id, title, content)
+    return {
+        "id": note_id,
+        "title": title,
+        "content": content,
+        "created_at": "",
+    }
 
 
 def update_note(user_id: int, note_id: int, title: str, content: str) -> bool:
@@ -526,10 +759,70 @@ def update_note(user_id: int, note_id: int, title: str, content: str) -> bool:
             conn.execute(
                 "DELETE FROM note_embedding_index WHERE note_id = ?", (note_id,)
             )
-            _queue_note_embedding(conn, note_id, user_id)
+            _queue_note_embedding(conn, note_id, user_id, title, content)
             return True
     finally:
         conn.close()
+
+
+def update_note_idempotent(
+    user_id: int,
+    note_id: int,
+    title: str,
+    content: str,
+    idempotency_key: str,
+) -> dict:
+    def execute(conn) -> dict:
+        if conn is None:
+            if not update_note(user_id, note_id, title, content):
+                return {"found": False}
+            return {
+                "found": True,
+                "id": note_id,
+                "title": title,
+                "content": content,
+                "created_at": "",
+            }
+        indexed = conn.execute(
+            """SELECT i.collection
+                 FROM note_embedding_index AS i
+                 JOIN notes AS n ON n.id = i.note_id
+                WHERE i.note_id = ? AND n.user_id = ?""",
+            (note_id, user_id),
+        ).fetchone()
+        note = conn.execute(
+            "SELECT 1 FROM notes WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
+        ).fetchone()
+        if note is None:
+            return {"found": False}
+        if indexed is not None:
+            note_vector_index.delete_points(indexed["collection"], [note_id])
+        updated = conn.execute(
+            "UPDATE notes SET title = ?, content = ? WHERE id = ? AND user_id = ?",
+            (title, content, note_id, user_id),
+        )
+        if not updated.rowcount:
+            return {"found": False}
+        conn.execute(
+            "DELETE FROM note_embedding_index WHERE note_id = ?", (note_id,)
+        )
+        _queue_note_embedding(conn, note_id, user_id, title, content)
+        return {
+            "found": True,
+            "id": note_id,
+            "title": title,
+            "content": content,
+            "created_at": "",
+        }
+
+    return run_idempotent_request(
+        user_id,
+        idempotency_key,
+        "update_note",
+        {"note_id": note_id, "title": title, "content": content},
+        execute,
+    )
 
 
 def search_notes(user_id: int, keyword: str) -> list[dict]:
@@ -549,21 +842,44 @@ def search_notes(user_id: int, keyword: str) -> list[dict]:
         conn.close()
 
 
-def get_pending_note_embeddings(limit: int = 20) -> list[dict]:
+def get_pending_note_embeddings(limit: int = 20, lease_owner: str | None = None) -> list[dict]:
     if not 1 <= limit <= 100:
         raise ValueError("Embedding batch size must be between 1 and 100.")
     conn = get_connection()
     try:
-        rows = conn.execute(
-            """SELECT n.id, n.user_id, n.title, n.content
-                 FROM note_embedding_jobs AS j
-                 JOIN notes AS n ON n.id = j.note_id AND n.user_id = j.user_id
-                WHERE j.next_attempt_at <= ?
-                ORDER BY j.next_attempt_at, j.note_id
-                LIMIT ?""",
-            (int(time.time()), limit),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = int(time.time())
+            if lease_owner:
+                conn.execute(
+                    """UPDATE note_embedding_jobs
+                          SET lease_owner = NULL, lease_until = 0
+                        WHERE lease_until > 0 AND lease_until <= ?""",
+                    (now,),
+                )
+            rows = conn.execute(
+                """SELECT n.id, n.user_id, n.title, n.content
+                     FROM note_embedding_jobs AS j
+                     JOIN notes AS n ON n.id = j.note_id AND n.user_id = j.user_id
+                    WHERE j.next_attempt_at <= ?
+                      AND (
+                           j.lease_owner IS NULL
+                           OR j.lease_until <= ?
+                           OR j.lease_owner = ?
+                          )
+                    ORDER BY j.next_attempt_at, j.note_id
+                    LIMIT ?""",
+                (now, now, lease_owner or "", limit),
+            ).fetchall()
+            if lease_owner:
+                lease_until = now + 300
+                conn.executemany(
+                    """UPDATE note_embedding_jobs
+                          SET lease_owner = ?, lease_until = ?
+                        WHERE note_id = ?""",
+                    [(lease_owner, lease_until, row["id"]) for row in rows],
+                )
+            return [dict(row) for row in rows]
     finally:
         conn.close()
 
@@ -582,7 +898,8 @@ def record_note_embedding_failure(note_id: int, error: str) -> None:
             retry_delay = min(3600, 2 ** min(attempts, 12))
             conn.execute(
                 """UPDATE note_embedding_jobs
-                      SET attempts = ?, next_attempt_at = ?, last_error = ?
+                      SET attempts = ?, next_attempt_at = ?, last_error = ?,
+                          lease_owner = NULL, lease_until = 0
                     WHERE note_id = ?""",
                 (
                     attempts,
@@ -651,6 +968,8 @@ def upsert_note_embedding(
                 "SELECT title, content FROM notes WHERE id = ? AND user_id = ?",
                 (note_id, user_id),
             ).fetchone()
+            # Validate both ownership and the note snapshot before touching
+            # Qdrant. A stale worker can therefore never replace a newer vector.
             if note is None or note_content_hash(
                 note["title"], note["content"]
             ) != content_hash:
@@ -818,6 +1137,38 @@ def clear_notes(user_id: int) -> int:
         conn.close()
 
 
+def clear_notes_in_transaction(conn, user_id: int) -> dict:
+    if conn is None:
+        return {"deleted_count": clear_notes(user_id)}
+    indexed_rows = conn.execute(
+        """SELECT note_id, collection FROM note_embedding_index
+             WHERE user_id = ?""",
+        (user_id,),
+    ).fetchall()
+    by_collection: dict[str, list[int]] = {}
+    for row in indexed_rows:
+        by_collection.setdefault(row["collection"], []).append(row["note_id"])
+    for collection, note_ids in by_collection.items():
+        note_vector_index.delete_points(collection, note_ids)
+    cur = conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+    return {"deleted_count": cur.rowcount}
+
+
+def clear_notes_idempotent(
+    user_id: int,
+    idempotency_key: str,
+) -> dict:
+    # Clearing has no payload beyond the owner scope. The stored count prevents
+    # a timeout retry from reporting a second deletion as 0 instead of 1.
+    return run_idempotent_request(
+        user_id,
+        idempotency_key,
+        "clear_notes",
+        {},
+        lambda conn: clear_notes_in_transaction(conn, user_id),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Tasks
 # --------------------------------------------------------------------------- #
@@ -833,6 +1184,51 @@ def create_task(user_id: int, title: str, due_date: str | None = None) -> int:
             return cur.lastrowid
     finally:
         conn.close()
+
+
+def create_task_idempotent(
+    user_id: int,
+    title: str,
+    due_date: str | None,
+    idempotency_key: str,
+) -> dict:
+    return run_idempotent_request(
+        user_id,
+        idempotency_key,
+        "create_task",
+        {"title": title, "due_date": due_date or ""},
+        lambda conn: create_task_in_transaction(
+            conn, user_id, title, due_date
+        ),
+    )
+
+
+def create_task_in_transaction(
+    conn,
+    user_id: int,
+    title: str,
+    due_date: str | None,
+) -> dict:
+    if conn is None:
+        task_id = create_task(user_id, title, due_date)
+        return {
+            "id": task_id,
+            "title": title,
+            "due_date": due_date or "",
+            "completed": False,
+            "created_at": "",
+        }
+    cur = conn.execute(
+        "INSERT INTO tasks (user_id, title, due_date) VALUES (?, ?, ?)",
+        (user_id, title, due_date),
+    )
+    return {
+        "id": cur.lastrowid,
+        "title": title,
+        "due_date": due_date or "",
+        "completed": False,
+        "created_at": "",
+    }
 
 
 def get_tasks(user_id: int) -> list[dict]:
@@ -863,6 +1259,31 @@ def complete_task(user_id: int, task_id: int) -> bool:
             return cur.rowcount > 0
     finally:
         conn.close()
+
+
+def complete_task_idempotent(
+    user_id: int,
+    task_id: int,
+    idempotency_key: str,
+) -> dict:
+    def execute(conn) -> dict:
+        if conn is None:
+            return {"success": complete_task(user_id, task_id)}
+        return {
+            "success": conn.execute(
+                "UPDATE tasks SET completed = 1 WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            ).rowcount
+            > 0
+        }
+
+    return run_idempotent_request(
+        user_id,
+        idempotency_key,
+        "complete_task",
+        {"task_id": task_id},
+        execute,
+    )
 
 # --------------------------------------------------------------------------- #
 # Password hashing

@@ -2,6 +2,7 @@
 
 import sqlite3
 import struct
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -34,6 +35,76 @@ def test_notes_are_isolated_by_owner(owners_db):
     assert note_id > 0
     assert db.search_notes(user_a, "milk")[0]["title"] == "Grocery"
     assert db.search_notes(user_b, "milk") == []
+
+
+def test_mutation_idempotency_retries_and_payload_conflicts(owners_db):
+    user_a, user_b = owners_db
+
+    first = db.save_note_idempotent(
+        user_a, "Retry note", "same payload", "save-key"
+    )
+    repeated = db.save_note_idempotent(
+        user_a, "Retry note", "same payload", "save-key"
+    )
+    assert repeated == first
+    assert db.search_notes(user_a, "Retry note")[0]["id"] == first["id"]
+    assert len(db.search_notes(user_a, "Retry note")) == 1
+
+    with pytest.raises(db.IdempotencyConflict):
+        db.save_note_idempotent(
+            user_a, "Different", "payload", "save-key"
+        )
+    # Key scope includes user_id, so the same key is independent for another owner.
+    other_owner = db.save_note_idempotent(
+        user_b, "Retry note", "same payload", "save-key"
+    )
+    assert other_owner["id"] != first["id"]
+
+    clear_first = db.clear_notes_idempotent(user_a, "clear-key")
+    clear_repeated = db.clear_notes_idempotent(user_a, "clear-key")
+    assert clear_repeated == clear_first
+    assert clear_repeated["deleted_count"] == 1
+
+
+def test_mutation_idempotency_handles_concurrent_creates(owners_db):
+    user_a, _ = owners_db
+
+    # BEGIN IMMEDIATE serializes the key claim, so exactly one worker executes
+    # the insert and both callers receive the same original note response.
+    def create():
+        return db.save_note_idempotent(
+            user_a, "Concurrent", "one note", "concurrent-key"
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: create(), range(2)))
+
+    assert results[0] == results[1]
+    assert len(db.search_notes(user_a, "Concurrent")) == 1
+
+
+def test_stale_embedding_upsert_cannot_replace_updated_note(owners_db):
+    user_a, _ = owners_db
+    note_id = db.save_note(user_a, "Old", "first content")
+    old_hash = note_content_hash("Old", "first content")
+
+    assert db.update_note(user_a, note_id, "New", "second content")
+    assert not db.upsert_note_embedding(
+        user_a,
+        note_id,
+        [1.0, 0.0],
+        "test-model",
+        old_hash,
+    )
+
+    new_hash = note_content_hash("New", "second content")
+    assert db.upsert_note_embedding(
+        user_a,
+        note_id,
+        [0.0, 1.0],
+        "test-model",
+        new_hash,
+    )
 
 
 def test_missing_note_embeddings_are_backfilled_idempotently(owners_db):

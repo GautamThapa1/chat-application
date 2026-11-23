@@ -136,26 +136,52 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
     # Notes  (db.save_note / db.search_notes)
     # ---------------------------------------------------------------- #
     def SaveNote(self, request, context):
-        note_id = db.save_note(current_user_id(), request.title, request.content)
+        try:
+            result = db.save_note_idempotent(
+                current_user_id(),
+                request.title,
+                request.content,
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
         return chat_pb2.SaveNoteResponse(
             note=chat_pb2.Note(
-                id=note_id,
-                title=request.title,
-                content=request.content,
+                id=result["id"],
+                title=result["title"],
+                content=result["content"],
+                created_at=result["created_at"],
             )
         )
 
     def UpdateNote(self, request, context):
         user_id = current_user_id()
-        if not db.update_note(
-            user_id, request.note_id, request.title, request.content
-        ):
+        try:
+            result = db.update_note_idempotent(
+                user_id,
+                request.note_id,
+                request.title,
+                request.content,
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        if not result["found"]:
             context.abort(grpc.StatusCode.NOT_FOUND, "Note not found.")
         return chat_pb2.UpdateNoteResponse(
             note=chat_pb2.Note(
-                id=request.note_id,
-                title=request.title,
-                content=request.content,
+                id=result["id"],
+                title=result["title"],
+                content=result["content"],
+                created_at=result["created_at"],
             )
         )
 
@@ -210,22 +236,45 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         return chat_pb2.UpsertNoteEmbeddingResponse(indexed=indexed)
 
     def ClearNotes(self, request, context):
-        deleted_count = db.clear_notes(current_user_id())
-        return chat_pb2.ClearNotesResponse(deleted_count=deleted_count)
+        try:
+            result = db.clear_notes_idempotent(
+                current_user_id(),
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.ClearNotesResponse(
+            deleted_count=result["deleted_count"]
+        )
 
     # ---------------------------------------------------------------- #
     # Tasks  (db.create_task / db.get_tasks / db.complete_task)
     # ---------------------------------------------------------------- #
     def CreateTask(self, request, context):
-        task_id = db.create_task(
-            current_user_id(), request.title, due_date=request.due_date or None
-        )
+        try:
+            result = db.create_task_idempotent(
+                current_user_id(),
+                request.title,
+                request.due_date or None,
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
         return chat_pb2.CreateTaskResponse(
             task=chat_pb2.Task(
-                id=task_id,
-                title=request.title,
-                due_date=request.due_date,
-                completed=False,
+                id=result["id"],
+                title=result["title"],
+                due_date=result["due_date"],
+                completed=result["completed"],
+                created_at=result["created_at"],
             )
         )
 
@@ -245,8 +294,19 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
 
     def CompleteTask(self, request, context):
-        ok = db.complete_task(current_user_id(), request.task_id)
-        return chat_pb2.CompleteTaskResponse(success=ok)
+        try:
+            result = db.complete_task_idempotent(
+                current_user_id(),
+                request.task_id,
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.CompleteTaskResponse(success=result["success"])
 
 
 def _conversation_message(row: dict) -> chat_pb2.Conversation:

@@ -72,3 +72,33 @@ def test_worker_records_embedding_failure_and_keeps_note(tmp_path, monkeypatch):
         assert job["last_error"] == "temporary embedding failure"
     finally:
         conn.close()
+
+
+def test_worker_restart_reclaims_expired_embedding_job(tmp_path, monkeypatch):
+    user_id = _setup_database(tmp_path, monkeypatch)
+    db.save_note(user_id, "Restart", "worker lease")
+    first = embedding_worker.NoteEmbeddingWorker()
+    second = embedding_worker.NoteEmbeddingWorker()
+
+    first_jobs = db.get_pending_note_embeddings(
+        20, lease_owner=first._lease_owner
+    )
+    second_jobs = db.get_pending_note_embeddings(
+        20, lease_owner=second._lease_owner
+    )
+    assert len(first_jobs) == 1
+    assert second_jobs == []
+
+    conn = db.get_connection()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE note_embedding_jobs SET lease_until = 0"
+            )
+    finally:
+        conn.close()
+
+    reclaimed = db.get_pending_note_embeddings(
+        20, lease_owner=second._lease_owner
+    )
+    assert [job["id"] for job in reclaimed] == [first_jobs[0]["id"]]

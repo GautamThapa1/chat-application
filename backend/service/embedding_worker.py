@@ -3,6 +3,7 @@
 import logging
 import os
 import threading
+import uuid
 
 from google import genai
 
@@ -24,6 +25,7 @@ class NoteEmbeddingWorker:
         self._poll_interval = poll_interval
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lease_owner = uuid.uuid4().hex
 
     def start(self) -> None:
         if self._thread is not None:
@@ -56,7 +58,10 @@ class NoteEmbeddingWorker:
 
     def _process_jobs(self, client) -> None:
         while not self._stop_event.is_set():
-            jobs = db.get_pending_note_embeddings(self._batch_size)
+            jobs = db.get_pending_note_embeddings(
+                self._batch_size,
+                lease_owner=self._lease_owner,
+            )
             if not jobs:
                 self._stop_event.wait(self._poll_interval)
                 continue
