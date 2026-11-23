@@ -12,6 +12,7 @@ dependencies = [
     "limits>=5.8.0",
     "python-dotenv>=1.2.4",
     "slowapi>=0.1.10",
+    "sqlcipher3-binary>=0.6.0",
     "uvicorn[standard]>=0.54.0",
 ]
 
