@@ -74,11 +74,22 @@ DATABASE_KEY=your_long_random_database_key
 Notes are indexed with Gemini embeddings. The gRPC service queues new and
 updated notes, backfills existing notes at startup, and retries failed
 embeddings without delaying or undoing note saves. The encrypted SQLite
-database remains the source of truth; a SQLite vector table keyed by note ID
-provides an idempotent index. Search combines semantic similarity with the
-existing keyword search and falls back to keyword-only search if query
-embedding fails. Similarity is calculated over the signed-in user's indexed
-notes in Python, so search cost grows linearly with that user's indexed notes.
+database remains the source of truth for note content and indexing jobs;
+Qdrant stores note vectors and performs owner-scoped nearest-neighbor search.
+Existing SQLite vectors are moved to Qdrant on the next indexing pass without
+re-embedding when their model and content hash are still current. Search
+combines semantic similarity with the existing keyword search and falls back
+to keyword-only search if query embedding fails.
+
+Start a local Qdrant instance before the gRPC service:
+
+```bash
+docker compose up -d qdrant
+```
+
+By default, the service connects to `http://localhost:6333`. Set `QDRANT_URL`
+and, for authenticated deployments, `QDRANT_API_KEY` in `.env` to override the
+connection. Qdrant data persists in the `qdrant_storage` Docker volume.
 
 Chat history is trimmed to the newest complete turns that fit this input-token
 budget. The current message is included in the count; messages exceeding the
