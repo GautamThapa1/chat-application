@@ -435,7 +435,11 @@ async function selectConversation(conversationId, initialPrompt = "") {
 
     if (result.data.messages.length) {
       for (const message of result.data.messages) {
-        addLine(message.role, message.content);
+        addLine(
+          message.role,
+          message.content,
+          message.message_id,
+        );
       }
     } else if (!initialPrompt) {
       resetChat();
@@ -696,11 +700,19 @@ stopButtonEl.addEventListener("click", () => {
   stopButtonEl.disabled = true;
 });
 
-function addLine(role, content) {
+function addLine(role, content, messageId = null) {
   logEl.querySelector(".empty-state")?.remove();
 
   const div = createMessageBubble(role);
   div.textContent = content;
+  if (messageId !== null) {
+    div.dataset.messageId = String(messageId);
+  }
+  if (role === "user" && messageId !== null) {
+    addMessageEditButton(div, messageId);
+  } else if (role === "assistant" && messageId !== null) {
+    addMessageRegenerateButton(div, messageId);
+  }
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -713,6 +725,82 @@ function createMessageBubble(role) {
   logEl.appendChild(div);
   return div;
 }
+
+
+function addMessageEditButton(bubble, messageId) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-action";
+  button.textContent = "Edit";
+  button.addEventListener("click", () => {
+    if (pendingBubbles.size > 0) return;
+    const original = bubble.childNodes[0]?.textContent || "";
+    const input = window.prompt("Edit message", original);
+    if (input === null || !input.trim() || input.trim() === original) return;
+    sendEditMessage(messageId, input.trim());
+  });
+  bubble.append(document.createElement("br"), button);
+}
+
+
+function addMessageRegenerateButton(bubble, messageId) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-action";
+  button.textContent = "Regenerate";
+  button.addEventListener("click", () => {
+    if (pendingBubbles.size > 0) return;
+    sendRegenerateMessage(messageId, bubble);
+  });
+  bubble.append(document.createElement("br"), button);
+}
+
+
+function sendEditMessage(messageId, text) {
+  if (!activeConversationId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const requestId = String(++nextRequestId);
+  ws.send(JSON.stringify({
+    type: "message",
+    mode: "edit",
+    message_id: messageId,
+    request_id: requestId,
+    conversation_id: activeConversationId,
+    content: text,
+  }));
+  // Remove the old branch from the UI immediately. The server has already
+  // validated ownership and atomically truncates later database rows.
+  const bubbles = Array.from(logEl.querySelectorAll(".msg"));
+  const bubbleIndex = bubbles.indexOf(
+    document.querySelector(`[data-message-id="${messageId}"]`)
+  );
+  if (bubbleIndex >= 0) {
+    const editedBubble = bubbles[bubbleIndex];
+    editedBubble.textContent = text;
+    delete editedBubble.dataset.messageId;
+    bubbles.slice(bubbleIndex + 1).forEach((oldBubble) => oldBubble.remove());
+  }
+  pendingBubbles.set(requestId, createThinkingBubble());
+  syncBusyState();
+}
+
+
+function sendRegenerateMessage(assistantMessageId, existingBubble) {
+  if (!activeConversationId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const requestId = String(++nextRequestId);
+  ws.send(JSON.stringify({
+    type: "message",
+    mode: "regenerate",
+    assistant_message_id: assistantMessageId,
+    request_id: requestId,
+    conversation_id: activeConversationId,
+    content: "",
+  }));
+  existingBubble.classList.add("thinking");
+  existingBubble.replaceChildren();
+  pendingBubbles.set(requestId, existingBubble);
+  syncBusyState();
+}
+
 
 function createThinkingBubble() {
   const bubble = createMessageBubble("assistant");
