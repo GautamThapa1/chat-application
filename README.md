@@ -65,7 +65,12 @@ Create a `.env` file in the project root:
 ```env
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3.5-flash-lite
+DATABASE_KEY=your_long_random_database_key
 ```
+
+`DATABASE_KEY` encrypts the SQLite database with SQLCipher. Keep it secret and
+back it up securely: the database cannot be opened if the key is lost. On first
+startup, an existing plaintext `app.db` is migrated to an encrypted database.
 
 **4. Start the gRPC service**
 
