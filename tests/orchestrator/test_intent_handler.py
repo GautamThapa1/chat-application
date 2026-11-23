@@ -1,441 +1,380 @@
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import grpc
 import pytest
+from google.genai import types
 
 from backend.orchestrator.intent_handler import (
-    classify_message,      # <-- was missing; tests would NameError without it
-    execute_action,
+    TOOL_CONFIG,
+    dispatch_tool_call,
+    handle_function_calls,
     save_conversation,
 )
 
 
-def create_gemini_client(response_text):
-    """Create a fake Gemini client for testing."""
-
-    generate_content = AsyncMock(
-        return_value=SimpleNamespace(text=response_text)
+def function_response(*calls, text=None):
+    parts = [
+        types.Part(
+            function_call=types.FunctionCall(name=name, args=arguments)
+        )
+        for name, arguments in calls
+    ]
+    if text is not None:
+        parts.append(types.Part(text=text))
+    return SimpleNamespace(
+        candidates=[
+            SimpleNamespace(content=types.Content(role="model", parts=parts))
+        ],
+        text=text,
     )
 
-    client = SimpleNamespace(
+
+def gemini_client(*responses):
+    return SimpleNamespace(
         models=SimpleNamespace(
-            generate_content=generate_content
+            count_tokens=AsyncMock(
+                return_value=SimpleNamespace(total_tokens=1)
+            ),
+            generate_content=AsyncMock(side_effect=responses),
         )
     )
 
-    return client, generate_content
-
 
 @pytest.mark.asyncio
-async def test_classify_message_success():
-    # Arrange
-    decision = {
-        "intent": "CHAT",
-        "title": "",
-        "content": "",
-        "keyword": "",
-        "due_date": "",
-    }
+async def test_normal_chat_returns_to_streaming_path():
+    client = gemini_client(function_response(text="A non-tool response."))
 
-    client, mock_generate = create_gemini_client(
-        json.dumps(decision)
+    result = await handle_function_calls(
+        "Hello", client, "test-model", [], SimpleNamespace()
     )
 
-    # Act
-    result = await classify_message(
-        "Hello",
-        client,
-        "test-model",
-    )
-
-    # Assert
-    assert result == decision
-
-    mock_generate.assert_awaited_once()
-
-    call_args = mock_generate.await_args.kwargs
-
-    assert call_args["model"] == "test-model"
-    assert call_args["contents"] == 'Classify this user message:\n"Hello"'
+    assert result is None
+    client.models.generate_content.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_classify_message_empty_response():
-    # Arrange
-    client, _ = create_gemini_client(None)
-
-    # Act and Assert
-    with pytest.raises(ValueError, match="empty intent classification"):
-        await classify_message("Hello", client, "test-model")
-
-
-@pytest.mark.asyncio
-async def test_classify_message_invalid_json():
-    # Arrange
-    client, _ = create_gemini_client("This is not JSON")
-
-    # Act and Assert
-    with pytest.raises(ValueError, match="invalid JSON"):
-        await classify_message("Hello", client, "test-model")
-
-
-@pytest.mark.asyncio
-async def test_classify_message_unsupported_intent():
-    # Arrange
-    decision = {
-        "intent": "DELETE_EVERYTHING",
-        "title": "",
-        "content": "",
-        "keyword": "",
-        "due_date": "",
+def test_native_tools_declare_all_supported_operations():
+    assert {
+        declaration.name
+        for declaration in TOOL_CONFIG.tools[0].function_declarations
+    } == {
+        "save_note",
+        "search_notes",
+        "list_notes",
+        "clear_notes",
+        "create_task",
+        "list_tasks",
+        "complete_task",
     }
 
-    client, _ = create_gemini_client(json.dumps(decision))
-
-    # Act and Assert
-    with pytest.raises(ValueError, match="unsupported intent"):
-        await classify_message("Hello", client, "test-model")
-
 
 @pytest.mark.asyncio
-async def test_classify_message_missing_required_field():
-    # Arrange
-    decision = {
-        "intent": "CHAT",
-        "content": "",
-        "keyword": "",
-        "due_date": "",
-    }
-
-    client, _ = create_gemini_client(json.dumps(decision))
-
-    # Act and Assert
-    with pytest.raises(ValueError, match="invalid title"):
-        await classify_message("Hello", client, "test-model")
-
-
-@pytest.mark.asyncio
-async def test_classify_message_missing_task_id():
-    # Arrange
-    decision = {
-        "intent": "COMPLETE_TASK",
-        "title": "",
-        "content": "",
-        "keyword": "",
-        "due_date": "",
-    }
-
-    client, _ = create_gemini_client(json.dumps(decision))
-
-    # Act and Assert
-    with pytest.raises(ValueError, match="invalid task ID"):
-        await classify_message(
-            "Complete task 5",
-            client,
-            "test-model",
-        )
-
-
-@pytest.mark.asyncio
-async def test_execute_save_note():
-    # Arrange
+async def test_save_note_dispatch_validates_and_maps_arguments():
     stub = SimpleNamespace(
         SaveNote=AsyncMock(
             return_value=SimpleNamespace(
-                note=SimpleNamespace(
-                    id=1,
-                    title="Meeting"
-                )
+                note=SimpleNamespace(id=4, title="Meeting")
             )
         )
     )
 
-    decision = {
-        "intent": "SAVE_NOTE",
-        "title": "Meeting",
-        "content": "Meeting tomorrow",
-    }
+    result = await dispatch_tool_call(
+        "save_note",
+        {"title": " Meeting ", "content": " Discuss launch "},
+        stub,
+        user_message="Save a note",
+        history=[],
+        confirmation_token="unused",
+    )
 
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert result == "✅ Note saved (ID: 1): 'Meeting'"
-
-    stub.SaveNote.assert_awaited_once()
-
+    assert result.response == {"note_id": 4, "title": "Meeting"}
     request = stub.SaveNote.await_args.args[0]
-
-    assert request.title == "Meeting"
-    assert request.content == "Meeting tomorrow"
+    assert (request.title, request.content) == ("Meeting", "Discuss launch")
 
 
 @pytest.mark.asyncio
-async def test_execute_save_note_without_title():
-    # Arrange
-    stub = SimpleNamespace(SaveNote=AsyncMock())
-
-    decision = {
-        "intent": "SAVE_NOTE",
-        "title": "",
-        "content": "Meeting tomorrow",
-    }
-
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert result == "What title should I use for that note?"
-    stub.SaveNote.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_execute_search_notes():
-    # Arrange
+async def test_search_and_list_notes_map_to_search_notes_rpc():
+    note = SimpleNamespace(id=1, title="Plan", content="Launch plan", created_at="")
     stub = SimpleNamespace(
-        SearchNotes=AsyncMock(
-            return_value=SimpleNamespace(
-                notes=[
-                    SimpleNamespace(
-                        id=1,
-                        title="Meeting",
-                        content="Meeting tomorrow",
-                    )
-                ]
-            )
-        )
+        SearchNotes=AsyncMock(return_value=SimpleNamespace(notes=[note]))
     )
 
-    decision = {
-        "intent": "SEARCH_NOTES",
-        "keyword": "Meeting",
-    }
-
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert "Found 1 note(s)" in result
-    assert "[1] Meeting: Meeting tomorrow" in result
-
-    request = stub.SearchNotes.await_args.args[0]
-    assert request.keyword == "Meeting"
-
-
-@pytest.mark.asyncio
-async def test_execute_search_notes_without_keyword():
-    # Arrange
-    stub = SimpleNamespace(SearchNotes=AsyncMock())
-
-    decision = {
-        "intent": "SEARCH_NOTES",
-        "keyword": "",
-    }
-
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert result == "What should I search for in your notes?"
-    stub.SearchNotes.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_execute_clear_notes_reports_deleted_count():
-    stub = SimpleNamespace(
-        ClearNotes=AsyncMock(
-            return_value=SimpleNamespace(deleted_count=2)
-        )
+    searched = await dispatch_tool_call(
+        "search_notes",
+        {"keyword": " launch "},
+        stub,
+        user_message="Find launch",
+        history=[],
+        confirmation_token="unused",
+    )
+    listed = await dispatch_tool_call(
+        "list_notes",
+        {},
+        stub,
+        user_message="List notes",
+        history=[],
+        confirmation_token="unused",
     )
 
-    result = await execute_action({"intent": "CLEAR_NOTES"}, stub)
-
-    assert result == "🗑️ Removed 2 note(s)."
-    stub.ClearNotes.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_execute_clear_notes_when_empty():
-    stub = SimpleNamespace(
-        ClearNotes=AsyncMock(
-            return_value=SimpleNamespace(deleted_count=0)
-        )
-    )
-
-    result = await execute_action({"intent": "CLEAR_NOTES"}, stub)
-
-    assert result == "🔍 You have no notes to remove."
+    assert searched.response["notes"][0]["title"] == "Plan"
+    assert listed.response == searched.response
+    assert [
+        call.args[0].keyword for call in stub.SearchNotes.await_args_list
+    ] == ["launch", ""]
 
 
 @pytest.mark.asyncio
-async def test_execute_create_task():
-    # Arrange
+async def test_task_tools_dispatch_to_the_existing_grpc_methods():
     stub = SimpleNamespace(
         CreateTask=AsyncMock(
             return_value=SimpleNamespace(
-                task=SimpleNamespace(
-                    id=5,
-                    title="Study Python",
-                )
+                task=SimpleNamespace(id=9, title="Review", due_date="tomorrow")
             )
-        )
-    )
-
-    decision = {
-        "intent": "CREATE_TASK",
-        "title": "Study Python",
-        "due_date": "2026-11-20",
-    }
-
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert result == "✅ Task created (ID: 5): 'Study Python' due 2026-11-20"
-
-    request = stub.CreateTask.await_args.args[0]
-
-    assert request.title == "Study Python"
-    assert request.due_date == "2026-11-20"
-
-
-@pytest.mark.asyncio
-async def test_execute_list_tasks():
-    # Arrange
-    stub = SimpleNamespace(
+        ),
         ListTasks=AsyncMock(
             return_value=SimpleNamespace(
                 tasks=[
                     SimpleNamespace(
-                        id=1,
-                        title="Study Python",
-                        completed=False,
-                        due_date="2026-11-20",
-                    ),
-                    SimpleNamespace(
-                        id=2,
-                        title="Read a book",
-                        completed=True,
-                        due_date="",
-                    ),
+                        id=9, title="Review", due_date="tomorrow", completed=False
+                    )
                 ]
+            )
+        ),
+        CompleteTask=AsyncMock(
+            return_value=SimpleNamespace(success=True)
+        ),
+    )
+
+    created = await dispatch_tool_call(
+        "create_task",
+        {"title": " Review ", "due_date": " tomorrow "},
+        stub,
+        user_message="Add a task",
+        history=[],
+        confirmation_token="unused",
+    )
+    listed = await dispatch_tool_call(
+        "list_tasks",
+        {},
+        stub,
+        user_message="List tasks",
+        history=[],
+        confirmation_token="unused",
+    )
+    completed = await dispatch_tool_call(
+        "complete_task",
+        {"task_id": 9},
+        stub,
+        user_message="Complete task 9",
+        history=[],
+        confirmation_token="unused",
+    )
+
+    assert created.response == {
+        "task_id": 9,
+        "title": "Review",
+        "due_date": "tomorrow",
+    }
+    assert listed.response["tasks"][0]["id"] == 9
+    assert completed.response == {"task_id": 9, "success": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("save_note", {"title": "Only title"}),
+        ("search_notes", {"keyword": "  "}),
+        ("complete_task", {"task_id": True}),
+        ("list_tasks", {"unexpected": True}),
+    ],
+)
+async def test_invalid_tool_arguments_are_rejected_without_grpc_calls(
+    name, arguments,
+):
+    stub = SimpleNamespace(
+        SaveNote=AsyncMock(),
+        SearchNotes=AsyncMock(),
+        CompleteTask=AsyncMock(),
+        ListTasks=AsyncMock(),
+    )
+
+    result = await dispatch_tool_call(
+        name,
+        arguments,
+        stub,
+        user_message="Do it",
+        history=[],
+        confirmation_token="unused",
+    )
+
+    assert result.response.get("error")
+    for rpc in vars(stub).values():
+        rpc.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_is_rejected():
+    with pytest.raises(ValueError, match="Unknown Gemini tool"):
+        await dispatch_tool_call(
+            "delete_account",
+            {},
+            SimpleNamespace(),
+            user_message="Delete my account",
+            history=[],
+            confirmation_token="unused",
+        )
+
+
+@pytest.mark.asyncio
+async def test_multiple_tool_calls_are_executed_and_results_returned_to_gemini():
+    client = gemini_client(
+        function_response(
+            ("save_note", {"title": "Plan", "content": "Launch"}),
+            ("list_tasks", {}),
+        ),
+        function_response(text="I saved the note and listed your tasks."),
+    )
+    stub = SimpleNamespace(
+        SaveNote=AsyncMock(
+            return_value=SimpleNamespace(
+                note=SimpleNamespace(id=3, title="Plan")
+            )
+        ),
+        ListTasks=AsyncMock(return_value=SimpleNamespace(tasks=[])),
+    )
+
+    result = await handle_function_calls(
+        "Save a note and show my tasks",
+        client,
+        "test-model",
+        [],
+        stub,
+    )
+
+    assert result == "I saved the note and listed your tasks."
+    assert stub.SaveNote.await_count == 1
+    assert stub.ListTasks.await_count == 1
+    second_request = client.models.generate_content.await_args_list[1].kwargs
+    function_responses = second_request["contents"][-1]
+    assert function_responses.role == "tool"
+    assert [part.function_response.name for part in function_responses.parts] == [
+        "save_note",
+        "list_tasks",
+    ]
+    assert function_responses.parts[0].function_response.response == {
+        "note_id": 3,
+        "title": "Plan",
+    }
+
+
+@pytest.mark.asyncio
+async def test_function_call_loop_supports_additional_tool_rounds():
+    client = gemini_client(
+        function_response(("search_notes", {"keyword": "launch"})),
+        function_response(("list_tasks", {})),
+        function_response(text="I found notes and listed your tasks."),
+    )
+    stub = SimpleNamespace(
+        SearchNotes=AsyncMock(return_value=SimpleNamespace(notes=[])),
+        ListTasks=AsyncMock(return_value=SimpleNamespace(tasks=[])),
+    )
+
+    result = await handle_function_calls(
+        "Search launch notes and show my tasks",
+        client,
+        "test-model",
+        [],
+        stub,
+    )
+
+    assert result == "I found notes and listed your tasks."
+    assert client.models.generate_content.await_count == 3
+    assert stub.SearchNotes.await_count == 1
+    assert stub.ListTasks.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_grpc_tool_failure_is_propagated():
+    client = gemini_client(
+        function_response(("list_tasks", {}))
+    )
+    stub = SimpleNamespace(
+        ListTasks=AsyncMock(
+            side_effect=grpc.aio.AioRpcError(
+                grpc.StatusCode.UNAVAILABLE,
+                grpc.aio.Metadata(),
+                grpc.aio.Metadata(),
             )
         )
     )
 
-    decision = {"intent": "LIST_TASKS"}
+    with pytest.raises(grpc.aio.AioRpcError):
+        await handle_function_calls(
+            "List my tasks", client, "test-model", [], stub
+        )
 
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert "⬜ [1] Study Python (due 2026-11-20)" in result
-    assert "✅ [2] Read a book" in result
+    assert client.models.generate_content.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_execute_list_tasks_empty():
-    # Arrange
+async def test_clear_notes_requires_the_prompted_explicit_confirmation():
+    client = gemini_client(
+        function_response(("clear_notes", {})),
+        function_response(text="I need confirmation first."),
+    )
     stub = SimpleNamespace(
-        ListTasks=AsyncMock(
-            return_value=SimpleNamespace(tasks=[])
-        )
+        ClearNotes=AsyncMock(return_value=SimpleNamespace(deleted_count=2))
     )
 
-    # Act
-    result = await execute_action(
-        {"intent": "LIST_TASKS"},
+    reply = await handle_function_calls(
+        "Clear my notes", client, "test-model", [], stub
+    )
+
+    stub.ClearNotes.assert_not_awaited()
+    prompt = reply.splitlines()[-1]
+    assert "confirm clear notes " in prompt
+    token = prompt.split("confirm clear notes ", 1)[1].split("`", 1)[0]
+
+    confirmed = await dispatch_tool_call(
+        "clear_notes",
+        {},
         stub,
+        user_message=f"confirm clear notes {token}",
+        history=[{"role": "assistant", "content": reply}],
+        confirmation_token="unused",
     )
 
-    # Assert
-    assert result == "📋 You have no tasks."
+    assert confirmed.response == {"deleted_count": 2}
+    stub.ClearNotes.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_execute_complete_task_success():
-    # Arrange
+async def test_clear_notes_cannot_be_confirmed_without_a_pending_prompt():
     stub = SimpleNamespace(
-        CompleteTask=AsyncMock(
-            return_value=SimpleNamespace(success=True)
-        )
+        ClearNotes=AsyncMock(return_value=SimpleNamespace(deleted_count=1))
     )
 
-    decision = {
-        "intent": "COMPLETE_TASK",
-        "task_id": 5,
-    }
-
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert result == "✅ Task 5 marked as complete!"
-
-    request = stub.CompleteTask.await_args.args[0]
-    assert request.task_id == 5
-
-
-@pytest.mark.asyncio
-async def test_execute_complete_task_not_found():
-    # Arrange
-    stub = SimpleNamespace(
-        CompleteTask=AsyncMock(
-            return_value=SimpleNamespace(success=False)
-        )
+    result = await dispatch_tool_call(
+        "clear_notes",
+        {},
+        stub,
+        user_message="confirm clear notes arbitrary",
+        history=[],
+        confirmation_token="one-time-token",
     )
 
-    decision = {
-        "intent": "COMPLETE_TASK",
-        "task_id": 99,
-    }
-
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert result == "❌ Task 99 not found."
-
-
-@pytest.mark.asyncio
-async def test_execute_complete_task_invalid_id():
-    # Arrange
-    stub = SimpleNamespace(CompleteTask=AsyncMock())
-
-    decision = {
-        "intent": "COMPLETE_TASK",
-        "task_id": 0,
-    }
-
-    # Act
-    result = await execute_action(decision, stub)
-
-    # Assert
-    assert result == "Which task ID should I mark as complete?"
-    stub.CompleteTask.assert_not_awaited()
+    assert result.response["confirmation_required"] is True
+    stub.ClearNotes.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_save_conversation():
-    # Arrange
-    stub = SimpleNamespace(
-        SaveConversation=AsyncMock()
-    )
+    stub = SimpleNamespace(SaveConversation=AsyncMock())
 
-    # Act
-    await save_conversation(
-        "Hello",
-        "Hi there!",
-        stub,
-        42,
-    )
-
-    # Assert
-    stub.SaveConversation.assert_awaited_once()
+    await save_conversation("Hello", "Hi there!", stub, 42)
 
     request = stub.SaveConversation.await_args.args[0]
-
     assert request.user_content == "Hello"
     assert request.assistant_content == "Hi there!"
     assert request.conversation_id == 42

@@ -47,7 +47,7 @@ async def _count_tokens(gemini_client, model: str, contents: list[types.Content]
     return result.total_tokens
 
 
-async def _bounded_contents(
+async def bounded_contents(
     message: str,
     gemini_client,
     model: str,
@@ -93,7 +93,7 @@ async def stream_chat_response(
 ) -> AsyncIterator[str]:
     """Generate a response and yield text chunks as Gemini produces them."""
 
-    contents = await _bounded_contents(message, gemini_client, model, history or [])
+    contents = await bounded_contents(message, gemini_client, model, history or [])
 
     stream = await gemini_client.models.generate_content_stream(
         model=model,

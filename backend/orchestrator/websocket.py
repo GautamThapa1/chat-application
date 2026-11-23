@@ -14,8 +14,7 @@ from google.genai import errors
 from backend.generated import chat_pb2
 from backend.orchestrator.gemini_service import stream_chat_response
 from backend.orchestrator.intent_handler import (
-    classify_message,
-    execute_action,
+    handle_function_calls,
     save_conversation,
 )
 from backend.orchestrator.rate_limit import message_limit_retry_after
@@ -42,16 +41,21 @@ async def _process_message(
             {"role": item.role, "content": item.content}
             for item in conversation.messages
         ]
+        # this sends to gemini
+        await websocket.send_json({
+            "type": "start",
+            "request_id": request_id,
+            "role": "assistant",
+        })
+        tool_response = await handle_function_calls(
+            message,
+            gemini_client,
+            model,
+            history,
+            stub,
+        )
 
-        decision = await classify_message(message, gemini_client, model)
-
-        if decision["intent"] == "CHAT":
-            await websocket.send_json({
-                "type": "start",
-                "request_id": request_id,
-                "role": "assistant",
-            })
-
+        if tool_response is None:
             async for chunk in stream_chat_response(
                 message, gemini_client, model, history,
             ):
@@ -65,19 +69,9 @@ async def _process_message(
             response = "".join(response_chunks)
             if not response:
                 raise ValueError("Gemini returned an empty response.")
-
         else:
-            action = asyncio.ensure_future(execute_action(decision, stub))
-            try:
-                response = await asyncio.shield(action)
-            except asyncio.CancelledError:
-                response = await action
-
-            await websocket.send_json({
-                "type": "start",
-                "request_id": request_id,
-                "role": "assistant",
-            })
+            response = tool_response
+            response_chunks.append(response)
             await websocket.send_json({
                 "type": "chunk",
                 "request_id": request_id,
