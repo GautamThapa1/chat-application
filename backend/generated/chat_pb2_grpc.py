@@ -92,10 +92,25 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.SaveNoteRequest.SerializeToString,
                 response_deserializer=chat__pb2.SaveNoteResponse.FromString,
                 _registered_method=True)
+        self.UpdateNote = channel.unary_unary(
+                '/chat.ChatService/UpdateNote',
+                request_serializer=chat__pb2.UpdateNoteRequest.SerializeToString,
+                response_deserializer=chat__pb2.UpdateNoteResponse.FromString,
+                _registered_method=True)
         self.SearchNotes = channel.unary_unary(
                 '/chat.ChatService/SearchNotes',
                 request_serializer=chat__pb2.SearchNotesRequest.SerializeToString,
                 response_deserializer=chat__pb2.SearchNotesResponse.FromString,
+                _registered_method=True)
+        self.SearchNotesHybrid = channel.unary_unary(
+                '/chat.ChatService/SearchNotesHybrid',
+                request_serializer=chat__pb2.SearchNotesHybridRequest.SerializeToString,
+                response_deserializer=chat__pb2.SearchNotesResponse.FromString,
+                _registered_method=True)
+        self.UpsertNoteEmbedding = channel.unary_unary(
+                '/chat.ChatService/UpsertNoteEmbedding',
+                request_serializer=chat__pb2.UpsertNoteEmbeddingRequest.SerializeToString,
+                response_deserializer=chat__pb2.UpsertNoteEmbeddingResponse.FromString,
                 _registered_method=True)
         self.ClearNotes = channel.unary_unary(
                 '/chat.ChatService/ClearNotes',
@@ -191,7 +206,25 @@ class ChatServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def UpdateNote(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SearchNotes(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SearchNotesHybrid(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpsertNoteEmbedding(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -279,10 +312,25 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     request_deserializer=chat__pb2.SaveNoteRequest.FromString,
                     response_serializer=chat__pb2.SaveNoteResponse.SerializeToString,
             ),
+            'UpdateNote': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateNote,
+                    request_deserializer=chat__pb2.UpdateNoteRequest.FromString,
+                    response_serializer=chat__pb2.UpdateNoteResponse.SerializeToString,
+            ),
             'SearchNotes': grpc.unary_unary_rpc_method_handler(
                     servicer.SearchNotes,
                     request_deserializer=chat__pb2.SearchNotesRequest.FromString,
                     response_serializer=chat__pb2.SearchNotesResponse.SerializeToString,
+            ),
+            'SearchNotesHybrid': grpc.unary_unary_rpc_method_handler(
+                    servicer.SearchNotesHybrid,
+                    request_deserializer=chat__pb2.SearchNotesHybridRequest.FromString,
+                    response_serializer=chat__pb2.SearchNotesResponse.SerializeToString,
+            ),
+            'UpsertNoteEmbedding': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpsertNoteEmbedding,
+                    request_deserializer=chat__pb2.UpsertNoteEmbeddingRequest.FromString,
+                    response_serializer=chat__pb2.UpsertNoteEmbeddingResponse.SerializeToString,
             ),
             'ClearNotes': grpc.unary_unary_rpc_method_handler(
                     servicer.ClearNotes,
@@ -616,6 +664,33 @@ class ChatService:
             _registered_method=True)
 
     @staticmethod
+    def UpdateNote(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/UpdateNote',
+            chat__pb2.UpdateNoteRequest.SerializeToString,
+            chat__pb2.UpdateNoteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def SearchNotes(request,
             target,
             options=(),
@@ -632,6 +707,60 @@ class ChatService:
             '/chat.ChatService/SearchNotes',
             chat__pb2.SearchNotesRequest.SerializeToString,
             chat__pb2.SearchNotesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SearchNotesHybrid(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/SearchNotesHybrid',
+            chat__pb2.SearchNotesHybridRequest.SerializeToString,
+            chat__pb2.SearchNotesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpsertNoteEmbedding(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/UpsertNoteEmbedding',
+            chat__pb2.UpsertNoteEmbeddingRequest.SerializeToString,
+            chat__pb2.UpsertNoteEmbeddingResponse.FromString,
             options,
             channel_credentials,
             insecure,

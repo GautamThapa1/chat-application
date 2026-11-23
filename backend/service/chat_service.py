@@ -145,6 +145,20 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             )
         )
 
+    def UpdateNote(self, request, context):
+        user_id = current_user_id()
+        if not db.update_note(
+            user_id, request.note_id, request.title, request.content
+        ):
+            context.abort(grpc.StatusCode.NOT_FOUND, "Note not found.")
+        return chat_pb2.UpdateNoteResponse(
+            note=chat_pb2.Note(
+                id=request.note_id,
+                title=request.title,
+                content=request.content,
+            )
+        )
+
     def SearchNotes(self, request, context):
         rows = db.search_notes(current_user_id(), request.keyword)
         return chat_pb2.SearchNotesResponse(
@@ -158,6 +172,42 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                 for r in rows
             ]
         )
+
+    def SearchNotesHybrid(self, request, context):
+        try:
+            rows = db.search_notes_hybrid(
+                current_user_id(),
+                request.keyword,
+                list(request.embedding),
+                request.embedding_model,
+                limit=request.limit or 20,
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.SearchNotesResponse(
+            notes=[
+                chat_pb2.Note(
+                    id=row["id"],
+                    title=row["title"],
+                    content=row["content"],
+                    created_at=str(row["created_at"] or ""),
+                )
+                for row in rows
+            ]
+        )
+
+    def UpsertNoteEmbedding(self, request, context):
+        try:
+            indexed = db.upsert_note_embedding(
+                current_user_id(),
+                request.note_id,
+                list(request.embedding),
+                request.embedding_model,
+                request.content_hash,
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.UpsertNoteEmbeddingResponse(indexed=indexed)
 
     def ClearNotes(self, request, context):
         deleted_count = db.clear_notes(current_user_id())

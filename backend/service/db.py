@@ -2,16 +2,20 @@
 
 import hashlib
 import hmac
+import math
 import os
 import re
 import secrets
 import sqlite3
+import struct
 import tempfile
 import time
 from pathlib import Path
 
 import sqlcipher3
 from dotenv import load_dotenv
+
+from backend.embeddings import embedding_model, note_content_hash
 
 
 DB_PATH = "app.db"
@@ -141,6 +145,55 @@ def _preserve_unowned_table(conn, table: str, ownership_columns: set[str]) -> No
     conn.execute(f'ALTER TABLE "{table}" RENAME TO "{legacy_table}"')
 
 
+def _queue_note_embedding(
+    conn,
+    note_id: int,
+    user_id: int,
+    *,
+    reset_attempts: bool = True,
+) -> None:
+    if reset_attempts:
+        conn.execute(
+            """INSERT INTO note_embedding_jobs (note_id, user_id)
+               VALUES (?, ?)
+               ON CONFLICT(note_id) DO UPDATE SET
+                   user_id = excluded.user_id,
+                   attempts = 0,
+                   next_attempt_at = 0,
+                   last_error = NULL""",
+            (note_id, user_id),
+        )
+    else:
+        conn.execute(
+            """INSERT OR IGNORE INTO note_embedding_jobs (note_id, user_id)
+               VALUES (?, ?)""",
+            (note_id, user_id),
+        )
+
+
+def _reconcile_note_embedding_jobs(conn) -> None:
+    rows = conn.execute(
+        """SELECT n.id, n.user_id, n.title, n.content,
+                  e.model, e.content_hash
+             FROM notes AS n
+             LEFT JOIN note_embeddings AS e ON e.note_id = n.id"""
+    ).fetchall()
+    current_model = embedding_model()
+    for row in rows:
+        expected_hash = note_content_hash(row["title"], row["content"])
+        if (
+            row["model"] == current_model
+            and row["content_hash"] == expected_hash
+        ):
+            continue
+        if row["model"] is not None:
+            conn.execute(
+                "DELETE FROM note_embeddings WHERE note_id = ?",
+                (row["id"],),
+            )
+        _queue_note_embedding(conn, row["id"], row["user_id"], reset_attempts=False)
+
+
 def init_db():
     conn = get_connection()
     try:
@@ -199,6 +252,26 @@ def init_db():
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS note_embeddings (
+                    note_id      INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+                    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    model        TEXT NOT NULL,
+                    dimensions   INTEGER NOT NULL CHECK (dimensions > 0),
+                    embedding    BLOB NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    updated_at   INTEGER NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS note_embedding_jobs (
+                    note_id         INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+                    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    attempts        INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                    last_error      TEXT
+                )
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -221,9 +294,18 @@ def init_db():
                 "ON notes(user_id, id)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_note_embeddings_user "
+                "ON note_embeddings(user_id, note_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_note_embedding_jobs_due "
+                "ON note_embedding_jobs(next_attempt_at, note_id)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_user_status "
                 "ON tasks(user_id, completed, id)"
             )
+            _reconcile_note_embedding_jobs(conn)
     finally:
         conn.close()
 
@@ -387,7 +469,27 @@ def save_note(user_id: int, title: str, content: str) -> int:
                 "INSERT INTO notes (user_id, title, content) VALUES (?, ?, ?)",
                 (user_id, title, content),
             )
-            return cur.lastrowid
+            note_id = cur.lastrowid
+            _queue_note_embedding(conn, note_id, user_id)
+            return note_id
+    finally:
+        conn.close()
+
+
+def update_note(user_id: int, note_id: int, title: str, content: str) -> bool:
+    """Update an owned note and queue its replacement vector."""
+    conn = get_connection()
+    try:
+        with conn:
+            updated = conn.execute(
+                "UPDATE notes SET title = ?, content = ? WHERE id = ? AND user_id = ?",
+                (title, content, note_id, user_id),
+            )
+            if not updated.rowcount:
+                return False
+            conn.execute("DELETE FROM note_embeddings WHERE note_id = ?", (note_id,))
+            _queue_note_embedding(conn, note_id, user_id)
+            return True
     finally:
         conn.close()
 
@@ -405,6 +507,204 @@ def search_notes(user_id: int, keyword: str) -> list[dict]:
             (user_id, like, like),
         ).fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_pending_note_embeddings(limit: int = 20) -> list[dict]:
+    if not 1 <= limit <= 100:
+        raise ValueError("Embedding batch size must be between 1 and 100.")
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """SELECT n.id, n.user_id, n.title, n.content
+                 FROM note_embedding_jobs AS j
+                 JOIN notes AS n ON n.id = j.note_id AND n.user_id = j.user_id
+                WHERE j.next_attempt_at <= ?
+                ORDER BY j.next_attempt_at, j.note_id
+                LIMIT ?""",
+            (int(time.time()), limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def record_note_embedding_failure(note_id: int, error: str) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            row = conn.execute(
+                "SELECT attempts FROM note_embedding_jobs WHERE note_id = ?",
+                (note_id,),
+            ).fetchone()
+            if row is None:
+                return
+            attempts = row["attempts"] + 1
+            retry_delay = min(3600, 2 ** min(attempts, 12))
+            conn.execute(
+                """UPDATE note_embedding_jobs
+                      SET attempts = ?, next_attempt_at = ?, last_error = ?
+                    WHERE note_id = ?""",
+                (
+                    attempts,
+                    int(time.time()) + retry_delay,
+                    error[:500],
+                    note_id,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def _float_vector(values: list[float]) -> list[float]:
+    try:
+        vector = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Embedding must contain numeric values.") from exc
+    if not vector or any(not math.isfinite(value) for value in vector):
+        raise ValueError("Embedding must contain finite values.")
+    return vector
+
+
+def upsert_note_embedding(
+    user_id: int,
+    note_id: int,
+    embedding: list[float],
+    model: str,
+    content_hash: str,
+) -> bool:
+    """Idempotently replace the searchable vector for an owned note."""
+    vector = _float_vector(embedding)
+    if not model or not content_hash:
+        raise ValueError("Embedding model and content hash are required.")
+    try:
+        packed = struct.pack(f"<{len(vector)}f", *vector)
+    except (OverflowError, struct.error) as exc:
+        raise ValueError("Embedding values exceed supported precision.") from exc
+
+    conn = get_connection()
+    try:
+        with conn:
+            note = conn.execute(
+                "SELECT title, content FROM notes WHERE id = ? AND user_id = ?",
+                (note_id, user_id),
+            ).fetchone()
+            if note is None or note_content_hash(
+                note["title"], note["content"]
+            ) != content_hash:
+                return False
+
+            conn.execute(
+                """INSERT INTO note_embeddings
+                       (note_id, user_id, model, dimensions, embedding,
+                        content_hash, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(note_id) DO UPDATE SET
+                       user_id = excluded.user_id,
+                       model = excluded.model,
+                       dimensions = excluded.dimensions,
+                       embedding = excluded.embedding,
+                       content_hash = excluded.content_hash,
+                       updated_at = excluded.updated_at""",
+                (
+                    note_id,
+                    user_id,
+                    model,
+                    len(vector),
+                    packed,
+                    content_hash,
+                    int(time.time()),
+                ),
+            )
+            conn.execute(
+                "DELETE FROM note_embedding_jobs WHERE note_id = ?",
+                (note_id,),
+            )
+            return True
+    finally:
+        conn.close()
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right):
+        raise ValueError("Embedding dimensions do not match.")
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
+
+
+def search_notes_hybrid(
+    user_id: int,
+    keyword: str,
+    query_embedding: list[float],
+    model: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Combine exact cosine similarity with the existing case-insensitive search."""
+    query_vector = _float_vector(query_embedding)
+    if not model:
+        raise ValueError("Embedding model is required.")
+    if not 1 <= limit <= 100:
+        raise ValueError("Search limit must be between 1 and 100.")
+
+    conn = get_connection()
+    try:
+        keyword_ids = {
+            row["id"]
+            for row in conn.execute(
+                """SELECT id FROM notes
+                     WHERE user_id = ? AND (title LIKE ? OR content LIKE ?)""",
+                (user_id, f"%{keyword}%", f"%{keyword}%"),
+            ).fetchall()
+        } if keyword else set()
+        rows = conn.execute(
+            """SELECT n.id, n.title, n.content, n.created_at,
+                      e.embedding, e.dimensions
+                 FROM notes AS n
+                 LEFT JOIN note_embeddings AS e
+                   ON e.note_id = n.id
+                  AND e.user_id = n.user_id
+                  AND e.model = ?
+                WHERE n.user_id = ?""",
+            (model, user_id),
+        ).fetchall()
+
+        ranked = []
+        for row in rows:
+            similarity = None
+            if row["embedding"] is not None:
+                dimensions = row["dimensions"]
+                if dimensions == len(query_vector) and len(row["embedding"]) == dimensions * 4:
+                    stored_vector = list(
+                        struct.unpack(f"<{dimensions}f", row["embedding"])
+                    )
+                    similarity = max(
+                        -1.0,
+                        min(
+                            1.0,
+                            _cosine_similarity(query_vector, stored_vector),
+                        ),
+                    )
+            is_keyword_match = row["id"] in keyword_ids
+            if similarity is None and not is_keyword_match:
+                continue
+            semantic_score = (similarity + 1) / 2 if similarity is not None else 0
+            score = 0.7 * semantic_score + 0.3 * is_keyword_match
+            ranked.append((score, row))
+
+        ranked.sort(key=lambda result: (-result[0], result[1]["id"]))
+        return [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "content": row["content"],
+                "created_at": row["created_at"],
+            }
+            for _, row in ranked[:limit]
+        ]
     finally:
         conn.close()
 

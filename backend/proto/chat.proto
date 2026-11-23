@@ -108,12 +108,40 @@ message SaveNoteResponse {
   Note note = 1;
 }
 
+message UpdateNoteRequest {
+  int64  note_id = 1;
+  string title   = 2;
+  string content = 3;
+}
+
+message UpdateNoteResponse {
+  Note note = 1;
+}
+
 message SearchNotesRequest {
   string keyword = 1;
 }
 
+message SearchNotesHybridRequest {
+  string keyword           = 1;
+  repeated float embedding = 2;
+  string embedding_model   = 3;
+  int32  limit             = 4;
+}
+
 message SearchNotesResponse {
   repeated Note notes = 1;
+}
+
+message UpsertNoteEmbeddingRequest {
+  int64  note_id           = 1;
+  repeated float embedding = 2;
+  string embedding_model   = 3;
+  string content_hash      = 4;
+}
+
+message UpsertNoteEmbeddingResponse {
+  bool indexed = 1;
 }
 
 message ClearNotesRequest {}
@@ -201,7 +229,10 @@ service ChatService {
   rpc SaveConversation(SaveConversationRequest) returns (SaveConversationResponse);
 
   rpc SaveNote(SaveNoteRequest)         returns (SaveNoteResponse);
+  rpc UpdateNote(UpdateNoteRequest)     returns (UpdateNoteResponse);
   rpc SearchNotes(SearchNotesRequest)   returns (SearchNotesResponse);
+  rpc SearchNotesHybrid(SearchNotesHybridRequest) returns (SearchNotesResponse);
+  rpc UpsertNoteEmbedding(UpsertNoteEmbeddingRequest) returns (UpsertNoteEmbeddingResponse);
   rpc ClearNotes(ClearNotesRequest)     returns (ClearNotesResponse);
   rpc CreateTask(CreateTaskRequest)     returns (CreateTaskResponse);
   rpc ListTasks(ListTasksRequest)       returns (ListTasksResponse);
