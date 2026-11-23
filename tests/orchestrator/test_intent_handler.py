@@ -90,7 +90,11 @@ async def test_save_note_dispatch_validates_and_maps_arguments():
         confirmation_token="unused",
     )
 
-    assert result.response == {"note_id": 4, "title": "Meeting"}
+    assert result.response == {
+        "note_id": 4,
+        "title": "Meeting",
+        "status": "📝 Note added",
+    }
     request = stub.SaveNote.await_args.args[0]
     assert (request.title, request.content) == ("Meeting", "Discuss launch")
 
@@ -120,7 +124,11 @@ async def test_update_note_dispatch_maps_to_owner_checked_rpc():
         "Updated",
         "Revised",
     )
-    assert result.response == {"note_id": 12, "title": "Updated"}
+    assert result.response == {
+        "note_id": 12,
+        "title": "Updated",
+        "status": "📝 Note updated",
+    }
 
 
 @pytest.mark.asyncio
@@ -271,9 +279,15 @@ async def test_task_tools_dispatch_to_the_existing_grpc_methods():
         "task_id": 9,
         "title": "Review",
         "due_date": "tomorrow",
+        "status": "📌 Task added",
     }
     assert listed.response["tasks"][0]["id"] == 9
-    assert completed.response == {"task_id": 9, "success": True}
+    assert listed.response["tasks"][0]["status"] == "⏳ Pending"
+    assert completed.response == {
+        "task_id": 9,
+        "success": True,
+        "status": "✅ Task completed",
+    }
 
 
 @pytest.mark.asyncio
@@ -363,6 +377,7 @@ async def test_multiple_tool_calls_are_executed_and_results_returned_to_gemini()
     assert function_responses.parts[0].function_response.response == {
         "note_id": 3,
         "title": "Plan",
+        "status": "📝 Note added",
     }
 
 
@@ -443,7 +458,10 @@ async def test_clear_notes_requires_the_prompted_explicit_confirmation():
         confirmation_token="unused",
     )
 
-    assert confirmed.response == {"deleted_count": 2}
+    assert confirmed.response == {
+        "deleted_count": 2,
+        "status": "🗑️ Notes cleared",
+    }
     stub.ClearNotes.assert_awaited_once()
 
 
