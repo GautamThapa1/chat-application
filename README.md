@@ -11,6 +11,7 @@ A modern AI-powered chat application built with **Python, FastAPI, and Google Ge
 - **Chat History** — Create, manage, and delete conversations.
 - **Notes Management** — Save, search, and retrieve personal notes.
 - **Task Management** — Create, list, and complete tasks.
+- **Gemini Function Calling** — Execute note and task actions; clearing notes requires explicit confirmation.
 - **gRPC Communication** — Separate application logic from the backend service.
 - **SQLite Storage** — Persistent data storage.
 
@@ -20,7 +21,7 @@ A modern AI-powered chat application built with **Python, FastAPI, and Google Ge
 |---|---|
 | Python 3.12+ | Backend |
 | FastAPI | API and WebSocket server |
-| Google Gemini | AI responses and intent classification |
+| Google Gemini | Streaming chat and native function calling |
 | gRPC | Inter-service communication |
 | SQLite | Database |
 | HTML, CSS, JavaScript | Frontend |
