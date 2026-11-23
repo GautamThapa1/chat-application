@@ -160,6 +160,7 @@ async def websocket_endpoint(
                 await websocket.send_json({"type": "pong"})
                 continue
 
+            # stop/cancel 
             busy = current is not None and not current.done()
             if isinstance(payload, dict) and payload.get("type") == "cancel":
                 if busy and payload.get("request_id") == current_id:
