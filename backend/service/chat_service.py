@@ -136,6 +136,41 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             context.abort(grpc.StatusCode.NOT_FOUND, "Conversation not found.")
         return chat_pb2.DeleteConversationResponse(success=True)
 
+    def SearchConversations(self, request, context):
+        user_id = current_user_id()
+        try:
+            limit = request.limit or 20
+            if request.embedding and request.embedding_model:
+                rows = db.search_conversations_hybrid(
+                    user_id,
+                    request.keyword,
+                    list(request.embedding),
+                    request.embedding_model,
+                    limit=limit,
+                )
+            else:
+                rows = db.search_conversations_keyword(
+                    user_id,
+                    request.keyword,
+                    limit=limit,
+                )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.SearchConversationsResponse(
+            results=[
+                chat_pb2.ConversationSearchResult(
+                    conversation_id=row["conversation_id"],
+                    title=row["title"],
+                    excerpt=row["excerpt"],
+                    updated_at=str(row["updated_at"] or ""),
+                    score=row["score"],
+                    message_start_id=row.get("message_start_id", 0),
+                    message_end_id=row.get("message_end_id", 0),
+                )
+                for row in rows
+            ]
+        )
+
     def EditConversationMessage(self, request, context):
         try:
             success, content = db.edit_conversation_message(

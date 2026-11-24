@@ -39,6 +39,21 @@ def conversation_stub():
             )
         ),
         DeleteConversation=AsyncMock(return_value=SimpleNamespace(success=True)),
+        SearchConversations=AsyncMock(
+            return_value=SimpleNamespace(
+                results=[
+                    SimpleNamespace(
+                        conversation_id=11,
+                        title="Private chat",
+                        excerpt="[USER] Find the deployment instructions",
+                        updated_at="updated",
+                        score=0.91,
+                        message_start_id=5,
+                        message_end_id=6,
+                    )
+                ]
+            )
+        ),
     )
     app = FastAPI()
     app.state.grpc_stub = stub
@@ -139,3 +154,43 @@ def test_conversation_pagination_uses_defaults():
 
     assert list_request.limit == 20
     assert list_request.offset == 0
+
+
+
+def test_conversation_search_uses_authenticated_grpc_and_returns_chunk_preview():
+    client, stub = conversation_stub()
+    client.cookies.set("session", "user-session")
+
+    response = client.post(
+        "/api/conversations/search",
+        json={"query": "deployment instructions", "limit": 7},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["conversation_id"] == 11
+    assert response.json()["results"][0]["excerpt"].startswith("[USER]")
+    request = stub.SearchConversations.await_args.args[0]
+    assert request.keyword == "deployment instructions"
+    assert request.limit == 7
+    assert not request.embedding
+    assert stub.SearchConversations.await_args.kwargs["metadata"] == (
+        ("session-token", "user-session"),
+    )
+
+
+def test_conversation_search_requires_a_session_and_nonempty_query():
+    client, stub = conversation_stub()
+
+    unauthorized = client.post(
+        "/api/conversations/search", json={"query": "something"}
+    )
+    client.cookies.set("session", "user-session")
+    empty = client.post("/api/conversations/search", json={"query": "  "})
+    too_long = client.post(
+        "/api/conversations/search", json={"query": "x" * 2001}
+    )
+
+    assert unauthorized.status_code == 401
+    assert empty.status_code == 422
+    assert too_long.status_code == 422
+    stub.SearchConversations.assert_not_awaited()

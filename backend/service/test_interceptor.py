@@ -486,4 +486,5 @@ def test_handler_can_see_authenticated_user_id(tmp_path, monkeypatch):
 def test_unknown_methods_are_protected_by_default():
     assert "/chat.ChatService/SaveNote" not in auth_interceptor.PUBLIC_METHODS
     assert "/chat.ChatService/SearchNotesHybrid" not in auth_interceptor.PUBLIC_METHODS
+    assert "/chat.ChatService/SearchConversations" not in auth_interceptor.PUBLIC_METHODS
     assert "/chat.ChatService/ListTasks" not in auth_interceptor.PUBLIC_METHODS

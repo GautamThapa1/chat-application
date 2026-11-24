@@ -62,6 +62,11 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.DeleteConversationRequest.SerializeToString,
                 response_deserializer=chat__pb2.DeleteConversationResponse.FromString,
                 _registered_method=True)
+        self.SearchConversations = channel.unary_unary(
+                '/chat.ChatService/SearchConversations',
+                request_serializer=chat__pb2.SearchConversationsRequest.SerializeToString,
+                response_deserializer=chat__pb2.SearchConversationsResponse.FromString,
+                _registered_method=True)
         self.EditConversationMessage = channel.unary_unary(
                 '/chat.ChatService/EditConversationMessage',
                 request_serializer=chat__pb2.EditConversationMessageRequest.SerializeToString,
@@ -230,6 +235,12 @@ class ChatServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def DeleteConversation(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SearchConversations(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -424,6 +435,11 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     servicer.DeleteConversation,
                     request_deserializer=chat__pb2.DeleteConversationRequest.FromString,
                     response_serializer=chat__pb2.DeleteConversationResponse.SerializeToString,
+            ),
+            'SearchConversations': grpc.unary_unary_rpc_method_handler(
+                    servicer.SearchConversations,
+                    request_deserializer=chat__pb2.SearchConversationsRequest.FromString,
+                    response_serializer=chat__pb2.SearchConversationsResponse.SerializeToString,
             ),
             'EditConversationMessage': grpc.unary_unary_rpc_method_handler(
                     servicer.EditConversationMessage,
@@ -699,6 +715,33 @@ class ChatService:
             '/chat.ChatService/DeleteConversation',
             chat__pb2.DeleteConversationRequest.SerializeToString,
             chat__pb2.DeleteConversationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SearchConversations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/SearchConversations',
+            chat__pb2.SearchConversationsRequest.SerializeToString,
+            chat__pb2.SearchConversationsResponse.FromString,
             options,
             channel_credentials,
             insecure,

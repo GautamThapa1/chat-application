@@ -79,6 +79,27 @@ message DeleteConversationResponse {
   bool success = 1;
 }
 
+message SearchConversationsRequest {
+  string keyword = 1;
+  repeated float embedding = 2;
+  string embedding_model = 3;
+  int32 limit = 4;
+}
+
+message ConversationSearchResult {
+  int64 conversation_id = 1;
+  string title = 2;
+  string excerpt = 3;
+  string updated_at = 4;
+  float score = 5;
+  int64 message_start_id = 6;
+  int64 message_end_id = 7;
+}
+
+message SearchConversationsResponse {
+  repeated ConversationSearchResult results = 1;
+}
+
 message EditConversationMessageRequest {
   int64  conversation_id = 1;
   int64  message_id      = 2;
@@ -365,6 +386,7 @@ service ChatService {
   rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
   rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
   rpc DeleteConversation(DeleteConversationRequest) returns (DeleteConversationResponse);
+  rpc SearchConversations(SearchConversationsRequest) returns (SearchConversationsResponse);
   rpc EditConversationMessage(EditConversationMessageRequest) returns (EditConversationMessageResponse);
   rpc RegenerateConversationMessage(RegenerateConversationMessageRequest) returns (RegenerateConversationMessageResponse);
   rpc ReplaceConversationMessage(ReplaceConversationMessageRequest) returns (ReplaceConversationMessageResponse);
