@@ -1,11 +1,25 @@
+"""WebSocket endpoint for chat messages, with background generation.
 
-"""WebSocket endpoint for chat messages."""
+How it works (the important part):
+
+* A generation (one Gemini reply) is an asyncio task owned by the
+  `GenerationHub`, NOT by the WebSocket that started it.
+* The hub is keyed by (user_id, conversation_id), so every conversation has
+  its own generation and its own status. Different conversations can generate
+  at the same time.
+* WebSockets are only "viewers": they subscribe to their user's events.
+  Closing a socket (switching chat, refreshing the page, a network drop) just
+  unsubscribes it. The task keeps running and saves its answer to the database.
+* Every event carries conversation_id and request_id so the browser can route
+  it to the right conversation and ignore stale ones.
+"""
 
 import asyncio
 import contextlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 
 import grpc
 from fastapi import WebSocket, WebSocketDisconnect
@@ -22,26 +36,164 @@ from backend.orchestrator.rate_limit import message_limit_retry_after
 log = logging.getLogger("orchestrator")
 
 
-async def _process_message(
-    websocket: WebSocket,
+def bad_id(value) -> bool:
+    """True unless `value` is a positive integer (bools are not ids)."""
+    return isinstance(value, bool) or not isinstance(value, int) or value < 1
+
+
+class Connection:
+    """One open WebSocket. Sends are serialised so events keep their order."""
+
+    def __init__(self, websocket: WebSocket):
+        self.websocket = websocket
+        self._lock = asyncio.Lock()  # FIFO: first caller sends first
+        self.alive = True
+
+    async def send(self, data: dict) -> bool:
+        if not self.alive:
+            return False
+        async with self._lock:
+            try:
+                await self.websocket.send_json(data)
+                return True
+            except Exception:  # a dead viewer must never break a generation
+                self.alive = False
+                return False
+
+
+@dataclass
+class Generation:
+    """Everything the server knows about one in-flight reply."""
+
+    user_id: int
+    conversation_id: int
+    request_id: str
+    mode: str  # "message" | "edit" | "regenerate"
+    prompt: str  # what the user asked (normal messages are saved only at the end)
+    assistant_message_id: int | None = None  # set when regenerating
+    chunks: list[str] = field(default_factory=list)
+    task: asyncio.Task | None = None
+
+    @property
+    def text(self) -> str:
+        return "".join(self.chunks)
+
+
+class GenerationHub:
+    """Registry of running generations and of connected viewers."""
+
+    def __init__(self):
+        # stores users generations and connections
+        self._generations: dict[tuple[int, int], Generation] = {}
+        self._connections: dict[int, set[Connection]] = {}
+
+    def reset(self) -> None:
+        """Forget everything (used by tests)."""
+        self._generations.clear()
+        self._connections.clear()
+
+    # ---- viewers ---------------------------------------------------- #
+    def add_connection(self, user_id: int, conn: Connection) -> None:
+        self._connections.setdefault(user_id, set()).add(conn)
+
+    def remove_connection(self, user_id: int, conn: Connection) -> None:
+        conns = self._connections.get(user_id)
+        if conns is not None:
+            conns.discard(conn)
+            if not conns:
+                del self._connections[user_id]
+
+    async def broadcast(self, user_id: int, event: dict) -> None:
+        conns = list(self._connections.get(user_id, ()))
+        if conns:
+            await asyncio.gather(*(conn.send(event) for conn in conns))
+
+    # ---- generations ------------------------------------------------ #
+    def get(self, user_id: int, conversation_id: int) -> Generation | None:
+        return self._generations.get((user_id, conversation_id))
+
+    def active_event(self, user_id: int) -> dict:
+        """Snapshot of this user's running generations, for (re)connecting."""
+        return {
+            "type": "active",
+            "generations": [
+                {
+                    "conversation_id": gen.conversation_id,
+                    "request_id": gen.request_id,
+                    "mode": gen.mode,
+                    "prompt": gen.prompt,
+                    "assistant_message_id": gen.assistant_message_id,
+                    "content": gen.text,
+                }
+                for (uid, _), gen in self._generations.items()
+                if uid == user_id
+            ],
+        }
+
+    def start(self, gen: Generation, coroutine_factory) -> None:
+        """Register `gen` and run it as a task that outlives any socket."""
+        self._generations[(gen.user_id, gen.conversation_id)] = gen
+        gen.task = asyncio.create_task(coroutine_factory(gen))
+        gen.task.add_done_callback(lambda task: self._on_done(gen, task))
+
+    def finish(self, gen: Generation) -> None:
+        """Remove `gen` from the registry (safe to call twice)."""
+        key = (gen.user_id, gen.conversation_id)
+        if self._generations.get(key) is gen:
+            del self._generations[key]
+
+    def cancel(
+        self, user_id: int, request_id: object, conversation_id: object = None
+    ) -> bool:
+        for (uid, conv_id), gen in list(self._generations.items()):
+            if uid != user_id or gen.request_id != request_id:
+                continue
+            if conversation_id is not None and conversation_id != conv_id:
+                continue
+            if gen.task is not None and not gen.task.done():
+                gen.task.cancel()
+                return True
+        return False
+
+    def _on_done(self, gen: Generation, task: asyncio.Task) -> None:
+        self.finish(gen)  # safety net: never leave a "busy" ghost behind
+        if not task.cancelled() and task.exception() is not None:
+            log.error("Message task crashed", exc_info=task.exception())
+
+
+# One hub for the whole process. (With several worker processes each would
+# have its own hub; run a single uvicorn worker, or move this state to Redis.)
+hub = GenerationHub()
+
+
+async def _run_generation(
+    gen: Generation,
     stub,
     gemini_client,
     model: str,
     message: str,
-    request_id: str,
-    conversation_id: int,
     *,
-    mode: str = "message",
     message_id: int | None = None,
-    assistant_message_id: int | None = None,
 ) -> None:
-    """Answer one chat message while the receive loop remains responsive."""
-    response_chunks: list[str] = []
+    """Produce one reply, save it, and tell whoever is watching."""
+    conversation_id = gen.conversation_id
+    request_id = gen.request_id
+
+    async def emit(event_type: str, **fields) -> None:
+        await hub.broadcast(gen.user_id, {
+            "type": event_type,
+            "conversation_id": conversation_id,
+            "request_id": request_id,
+            **fields,
+        })
+
+    terminal: tuple[str, dict] | None = None
+    cancelled = False
     try:
         history = []
         replace_assistant_id = None
 
-        if mode == "edit" and message_id is not None:
+        if gen.mode == "edit" and message_id is not None:
             # Editing a branch updates the original row and deletes every later
             # message before Gemini sees the edited prompt.
             edited = await stub.EditConversationMessage(
@@ -61,11 +213,11 @@ async def _process_message(
                 for item in conversation.messages
                 if item.message_id != message_id
             ]
-        elif mode == "regenerate" and assistant_message_id is not None:
+        elif gen.mode == "regenerate" and gen.assistant_message_id is not None:
             context = await stub.RegenerateConversationMessage(
                 chat_pb2.RegenerateConversationMessageRequest(
                     conversation_id=conversation_id,
-                    assistant_message_id=assistant_message_id,
+                    assistant_message_id=gen.assistant_message_id,
                     request_id=request_id,
                 )
             )
@@ -74,7 +226,7 @@ async def _process_message(
                 {"role": item.role, "content": item.content}
                 for item in context.history
             ]
-            replace_assistant_id = assistant_message_id
+            replace_assistant_id = gen.assistant_message_id
         else:
             conversation = await stub.GetConversation(
                 chat_pb2.GetConversationRequest(conversation_id=conversation_id)
@@ -83,43 +235,33 @@ async def _process_message(
                 {"role": item.role, "content": item.content}
                 for item in conversation.messages
             ]
-        # this sends to gemini
-        await websocket.send_json({
-            "type": "start",
-            "request_id": request_id,
-            "role": "assistant",
-        })
+
+        await emit("start", role="assistant")
         tool_response = await handle_function_calls(
-            message,
-            gemini_client,
-            model,
-            history,
-            stub,
+            message, gemini_client, model, history, stub,
         )
 
         if tool_response is None:
-            async for chunk in stream_chat_response(
-                message, gemini_client, model, history,
-            ):
-                response_chunks.append(chunk)
-                await websocket.send_json({
-                    "type": "chunk",
-                    "request_id": request_id,
-                    "content": chunk,
-                })
+            # aclosing() makes sure the Gemini stream is closed right away
+            # if this task is cancelled, instead of whenever it is garbage collected.
+            async with contextlib.aclosing(
+                stream_chat_response(message, gemini_client, model, history)
+            ) as stream:
+                async for chunk in stream:
+                    offset = len(gen.text)  # lets a late viewer drop duplicates
+                    gen.chunks.append(chunk)
+                    await emit("chunk", content=chunk, offset=offset)
 
-            response = "".join(response_chunks)
+            response = gen.text
             if not response:
                 raise ValueError("Gemini returned an empty response.")
         else:
             response = tool_response
-            response_chunks.append(response)
-            await websocket.send_json({
-                "type": "chunk",
-                "request_id": request_id,
-                "content": response,
-            })
+            gen.chunks.append(response)
+            await emit("chunk", content=response, offset=0)
 
+        # Save BEFORE announcing "complete": the database is the source of
+        # truth, and it is written even if nobody is watching any more.
         if replace_assistant_id is not None:
             replaced = await stub.ReplaceConversationMessage(
                 chat_pb2.ReplaceConversationMessageRequest(
@@ -132,59 +274,44 @@ async def _process_message(
             if not replaced.success:
                 raise ValueError("Could not replace the assistant response.")
         else:
-            if mode == "edit":
-                await save_conversation(
-                    message,
-                    response,
-                    stub,
-                    conversation_id,
-                    request_id,
-                )
-            else:
-                await save_conversation(
-                    message,
-                    response,
-                    stub,
-                    conversation_id,
-                    request_id,
-                )
-        await websocket.send_json({
-            "type": "complete",
-            "request_id": request_id,
-        })
+            # For "edit" the user row already exists; the database layer
+            # notices that and only appends the assistant reply.
+            await save_conversation(
+                message, response, stub, conversation_id, request_id,
+            )
+        terminal = ("complete", {})
 
     except asyncio.CancelledError:
-        partial = "".join(response_chunks)
-        if partial:
+        cancelled = True
+        partial = gen.text
+        # Keep what was streamed so far, except when regenerating: there the
+        # old answer is still in the database and must not be duplicated.
+        if partial and gen.mode != "regenerate":
             try:
                 await save_conversation(
-                    message,
-                    partial,
-                    stub,
-                    conversation_id,
-                    request_id,
+                    message, partial, stub, conversation_id, request_id,
                 )
             except grpc.aio.AioRpcError:
                 log.exception("Could not save the partial reply")
-        with contextlib.suppress(WebSocketDisconnect, RuntimeError, OSError):
-            await websocket.send_json({
-                "type": "cancelled",
-                "request_id": request_id,
-            })
-        raise
+        terminal = ("cancelled", {})
 
-    except (errors.APIError, grpc.aio.AioRpcError, ValueError) as exc:
-        log.exception("Failed to process chat message")
-        await websocket.send_json({
-            "type": "error",
-            "request_id": request_id,
-            "error": f"Message failed: {exc}",
-        })
+    except Exception as exc:  # noqa: BLE001 - a background task must report, not vanish
+        if isinstance(exc, (errors.APIError, grpc.aio.AioRpcError, ValueError)):
+            log.exception("Failed to process chat message")
+        else:
+            log.exception("Unexpected error while generating a reply")
+        terminal = ("error", {"error": f"Message failed: {exc}"})
 
+    finally:
+        # Free the conversation first, so a client that reacts to the final
+        # event by sending again is not told "still answering".
+        hub.finish(gen)
+        if terminal is not None:
+            with contextlib.suppress(Exception):
+                await emit(terminal[0], **terminal[1])
 
-def _log_task_failure(task: asyncio.Task) -> None:
-    if not task.cancelled() and task.exception() is not None:
-        log.error("Message task crashed", exc_info=task.exception())
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def websocket_endpoint(
@@ -198,8 +325,8 @@ async def websocket_endpoint(
 ) -> None:
     await websocket.accept()
     log.info("WebSocket connected")
-    current: asyncio.Task | None = None
-    current_id: str | None = None
+    conn = Connection(websocket)
+    hub.add_connection(user_id, conn)
 
     try:
         while True:
@@ -222,77 +349,66 @@ async def websocket_endpoint(
                 payload = json.loads(raw_message)
             except json.JSONDecodeError:
                 payload = {}
+            kind = payload.get("type") if isinstance(payload, dict) else None
 
             # Heartbeat: the client asks "are you alive?", we answer at once.
             # Handled before the rate limit, so a throttled user stays connected.
-            if isinstance(payload, dict) and payload.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
+            if kind == "ping":
+                await conn.send({"type": "pong"})
                 continue
 
-            # stop/cancel 
-            busy = current is not None and not current.done()
-            if isinstance(payload, dict) and payload.get("type") == "cancel":
-                if busy and payload.get("request_id") == current_id:
-                    current.cancel()
+            # "sync": the browser (re)connected and asks which generations are
+            # still running, so it can show the right status per conversation.
+            if kind == "sync":
+                await conn.send(hub.active_event(user_id))
                 continue
 
-            # Support structured JSON and plain-text messages.
-            if isinstance(payload, dict) and payload.get("type") == "message":
-                message = payload.get("content")
-                request_id = payload.get("request_id")
-                conversation_id = payload.get("conversation_id")
-                mode = payload.get("mode", "message")
-                message_id = payload.get("message_id")
-                assistant_message_id = payload.get("assistant_message_id")
+            # stop/cancel one generation of this user
+            if kind == "cancel":
+                hub.cancel(
+                    user_id,
+                    payload.get("request_id"),
+                    payload.get("conversation_id"),
+                )
+                continue
 
-                if (
-                    not isinstance(message, str)
-                    or not isinstance(request_id, str)
-                    or isinstance(conversation_id, bool)
-                    or not isinstance(conversation_id, int)
-                    or conversation_id < 1
-                    or mode not in {"message", "edit", "regenerate"}
-                ):
-                    await websocket.send_json({
-                        "type": "error",
-                        "request_id": request_id,
-                        "error": "Invalid message payload.",
-                    })
-                    continue
-                if mode == "edit" and (
-                    isinstance(message_id, bool)
-                    or not isinstance(message_id, int)
-                    or message_id < 1
-                ):
-                    await websocket.send_json({
-                        "type": "error",
-                        "request_id": request_id,
-                        "error": "Invalid message payload.",
-                    })
-                    continue
-                if mode == "regenerate" and (
-                    isinstance(assistant_message_id, bool)
-                    or not isinstance(assistant_message_id, int)
-                    or assistant_message_id < 1
-                ):
-                    await websocket.send_json({
-                        "type": "error",
-                        "request_id": request_id,
-                        "error": "Invalid message payload.",
-                    })
-                    continue
-            else:
-                await websocket.send_json({
+            # Support structured JSON messages.
+            if kind != "message":
+                await conn.send({
                     "type": "error",
                     "request_id": None,
                     "error": "Invalid message payload.",
                 })
                 continue
 
-            # One at a time; refused messages do not use up the user's quota.
-            if busy:
-                await websocket.send_json({
+            message = payload.get("content")
+            request_id = payload.get("request_id")
+            conversation_id = payload.get("conversation_id")
+            mode = payload.get("mode", "message")
+            message_id = payload.get("message_id")
+            assistant_message_id = payload.get("assistant_message_id")
+
+            if (
+                not isinstance(message, str)
+                or not isinstance(request_id, str)
+                or bad_id(conversation_id)
+                or mode not in {"message", "edit", "regenerate"}
+                or (mode == "edit" and bad_id(message_id))
+                or (mode == "regenerate" and bad_id(assistant_message_id))
+            ):
+                await conn.send({
                     "type": "error",
+                    "request_id": request_id,
+                    "error": "Invalid message payload.",
+                })
+                continue
+
+            # One at a time PER CONVERSATION; other conversations are free.
+            # Refused messages do not use up the user's quota.
+            if hub.get(user_id, conversation_id) is not None:
+                await conn.send({
+                    "type": "error",
+                    "conversation_id": conversation_id,
                     "request_id": request_id,
                     "error": "Still answering the previous message.",
                 })
@@ -301,30 +417,36 @@ async def websocket_endpoint(
             # Rate limit: only valid messages count, since only they cost money.
             retry_after = message_limit_retry_after(user_id)
             if retry_after is not None:
-                await websocket.send_json({
+                await conn.send({
                     "type": "error",
+                    "conversation_id": conversation_id,
                     "request_id": request_id,
                     "error": f"Too many messages. Try again in {retry_after}s.",
                 })
                 continue
 
-            current_id = request_id
-            current = asyncio.create_task(
-                _process_message(
-                    websocket, stub, gemini_client, model,
-                    message, request_id, conversation_id,
-                    mode=mode,
-                    message_id=message_id,
-                    assistant_message_id=assistant_message_id,
-                )
+            gen = Generation(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                request_id=request_id,
+                mode=mode,
+                prompt=message,
+                assistant_message_id=(
+                    assistant_message_id if mode == "regenerate" else None
+                ),
             )
-            current.add_done_callback(_log_task_failure)
+            hub.start(
+                gen,
+                lambda g, message=message, message_id=message_id: _run_generation(
+                    g, stub, gemini_client, model, message,
+                    message_id=message_id,
+                ),
+            )
 
     except WebSocketDisconnect:
         log.info("WebSocket disconnected")
     finally:
-        if current is not None and not current.done():
-            current.cancel()
-        if current is not None:
-            await asyncio.gather(current, return_exceptions=True)
-
+        # Only the viewer leaves. Running generations are NOT cancelled: they
+        # finish, save to the database, and the browser re-syncs on return.
+        conn.alive = False
+        hub.remove_connection(user_id, conn)

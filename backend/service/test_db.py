@@ -56,6 +56,35 @@ def test_edit_message_updates_and_deletes_later_messages(owners_db):
     )[0]
 
 
+def test_saving_after_an_edit_does_not_duplicate_the_user_message(owners_db):
+    user_a, _ = owners_db
+    conversation = db.create_conversation(user_a, "Edit save")
+    db.save_conversation(user_a, conversation["id"], "Hi", "Hello", "r1")
+    first_user = db.get_conversation_messages(user_a, conversation["id"])[0]
+
+    # The websocket does exactly this: edit first, then save the new answer.
+    db.edit_conversation_message(user_a, conversation["id"], first_user["id"], "Hi there")
+    db.save_conversation(user_a, conversation["id"], "Hi there", "New answer", "r2")
+
+    rows = db.get_conversation_messages(user_a, conversation["id"])
+    assert [(row["role"], row["content"]) for row in rows] == [
+        ("user", "Hi there"),
+        ("assistant", "New answer"),
+    ]
+
+
+def test_saving_the_same_text_after_an_answered_turn_still_adds_a_pair(owners_db):
+    user_a, _ = owners_db
+    conversation = db.create_conversation(user_a, "Repeat")
+    db.save_conversation(user_a, conversation["id"], "Hi", "Hello", "r1")
+    db.save_conversation(user_a, conversation["id"], "Hi", "Hello again", "r2")
+
+    rows = db.get_conversation_messages(user_a, conversation["id"])
+    assert [row["role"] for row in rows] == [
+        "user", "assistant", "user", "assistant",
+    ]
+
+
 def test_regenerate_context_and_assistant_replacement(owners_db):
     user_a, _ = owners_db
     conversation = db.create_conversation(user_a, "Regenerate test")

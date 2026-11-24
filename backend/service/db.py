@@ -723,14 +723,28 @@ def save_conversation(
                     (conversation_id, user_id, request_id),
                 )
 
+            # After an edit the (edited) user message is already stored and has
+            # no answer yet. Saving it again would show the prompt twice, so in
+            # that case only the assistant reply is appended.
+            last = conn.execute(
+                """SELECT role, content FROM messages
+                    WHERE conversation_id = ? AND user_id = ?
+                    ORDER BY message_id DESC LIMIT 1""",
+                (conversation_id, user_id),
+            ).fetchone()
+            user_already_saved = (
+                last is not None
+                and last["role"] == "user"
+                and last["content"] == user_content
+            )
+            new_rows = [(conversation_id, user_id, "assistant", assistant_content)]
+            if not user_already_saved:
+                new_rows.insert(0, (conversation_id, user_id, "user", user_content))
             conn.executemany(
                 """INSERT INTO messages
                    (conversation_id, user_id, role, content)
                    VALUES (?, ?, ?, ?)""",
-                (
-                    (conversation_id, user_id, "user", user_content),
-                    (conversation_id, user_id, "assistant", assistant_content),
-                ),
+                new_rows,
             )
             title = conversation["title"]
             if title == "New chat":

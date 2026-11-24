@@ -10,6 +10,7 @@ from fastapi import WebSocketDisconnect
 from google.genai import types
 
 import backend.orchestrator.websocket as websocket_module
+from backend.orchestrator.websocket import hub
 
 
 class FakeWebSocket:
@@ -498,12 +499,13 @@ def start_endpoint(websocket, user_id=1):
 def patch_blocking_stream(monkeypatch, *, first_chunk="Hel"):
     """Stream one chunk, then wait until the test releases the reply."""
     release = asyncio.Event()
-    state = {"cancelled": False}
+    state = {"cancelled": False, "parked": asyncio.Event()}
     save = AsyncMock()
 
     async def stream(message, client, model, history):
         try:
             yield first_chunk
+            state["parked"].set()  # the reply is now waiting for the test
             await release.wait()
             yield "lo"
         except asyncio.CancelledError:
@@ -538,9 +540,11 @@ async def test_cancel_stops_the_reply_and_keeps_the_partial_text(monkeypatch):
     ws.push(message_payload("r1"))
     assert (await ws.next_event("chunk"))["content"] == "Hel"
 
+    await asyncio.wait_for(state["parked"].wait(), timeout=1)
     ws.push({"type": "cancel", "request_id": "r1"})
     assert await ws.next_event("cancelled") == {
         "type": "cancelled",
+        "conversation_id": 3,
         "request_id": "r1",
     }
     assert state["cancelled"] is True
@@ -725,20 +729,6 @@ async def test_refused_message_does_not_use_up_the_quota(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_disconnect_cancels_the_reply_in_flight(monkeypatch):
-    release, state, save = patch_blocking_stream(monkeypatch)
-    ws = LiveWebSocket()
-    task = start_endpoint(ws)
-
-    ws.push(message_payload("r1"))
-    await ws.next_event("chunk")
-
-    ws.disconnect()
-    await asyncio.wait_for(task, timeout=1)
-    assert state["cancelled"] is True
-
-
-@pytest.mark.asyncio
 async def test_pings_are_answered_while_a_reply_is_streaming(monkeypatch):
     release, state, save = patch_blocking_stream(monkeypatch)
     ws = LiveWebSocket()
@@ -750,5 +740,303 @@ async def test_pings_are_answered_while_a_reply_is_streaming(monkeypatch):
     ws.push({"type": "ping"})
     assert await ws.next_event("pong") == {"type": "pong"}
 
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+    release.set()
+    await asyncio.sleep(0.05)
+
+
+# --------------------------------------------------------------------------- #
+# Background generation: a reply belongs to its conversation, not to a socket
+# --------------------------------------------------------------------------- #
+async def wait_until(condition, timeout=1):
+    """Poll until `condition()` is true (the reply runs in a background task)."""
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.005)
+
+
+def message_for(conversation_id, request_id, content="hi"):
+    return {
+        "type": "message",
+        "content": content,
+        "request_id": request_id,
+        "conversation_id": conversation_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_events_carry_conversation_and_request_ids(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_for(7, "r1"))
+    start_event = await ws.next_event("start")
+    chunk = await ws.next_event("chunk")
+    release.set()
+    complete = await ws.next_event("complete")
+
+    for event in (start_event, chunk, complete):
+        assert event["conversation_id"] == 7
+        assert event["request_id"] == "r1"
+    assert chunk["offset"] == 0
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_disconnect_does_not_cancel_and_the_reply_is_saved(monkeypatch):
+    """The root-cause test: closing the socket must not stop Gemini."""
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_for(3, "r1"))
+    await ws.next_event("chunk")
+
+    ws.disconnect()  # e.g. the user switched to another conversation
+    await asyncio.wait_for(task, timeout=1)
+    assert state["cancelled"] is False
+    assert hub.get(1, 3) is not None  # still generating, nobody watching
+
+    release.set()
+    await wait_until(lambda: save.await_count == 1)
+    assert save.await_args.args[:2] == ("hi", "Hello")
+    assert save.await_args.args[3] == 3
+    assert hub.get(1, 3) is None
+
+
+@pytest.mark.asyncio
+async def test_new_connection_can_resync_a_running_reply(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    first = LiveWebSocket()
+    first_task = start_endpoint(first)
+    first.push(message_for(3, "r1", "what is 2+2"))
+    await first.next_event("chunk")
+    first.disconnect()
+    await asyncio.wait_for(first_task, timeout=1)
+
+    # The user comes back (new socket) and asks what is still running.
+    second = LiveWebSocket()
+    second_task = start_endpoint(second)
+    second.push({"type": "sync"})
+    active = await second.next_event("active")
+    assert active["generations"] == [{
+        "conversation_id": 3,
+        "request_id": "r1",
+        "mode": "message",
+        "prompt": "what is 2+2",
+        "assistant_message_id": None,
+        "content": "Hel",
+    }]
+
+    # ...and the new socket receives the rest of the reply and the finish.
+    release.set()
+    rest = await second.next_event("chunk")
+    assert (rest["content"], rest["offset"]) == ("lo", 3)
+    assert (await second.next_event("complete"))["conversation_id"] == 3
+    save.assert_awaited_once()
+
+    second.disconnect()
+    await asyncio.wait_for(second_task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_other_users_do_not_see_my_generations(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    mine, theirs = LiveWebSocket(), LiveWebSocket()
+    mine_task = start_endpoint(mine, user_id=1)
+    theirs_task = start_endpoint(theirs, user_id=2)
+
+    mine.push(message_for(3, "r1"))
+    await mine.next_event("chunk")
+    theirs.push({"type": "sync"})
+    assert (await theirs.next_event("active"))["generations"] == []
+    assert theirs.outgoing.empty()
+
+    release.set()
+    await mine.next_event("complete")
+    mine.disconnect()
+    theirs.disconnect()
+    await asyncio.wait_for(asyncio.gather(mine_task, theirs_task), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_two_conversations_generate_at_the_same_time(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_for(3, "a", "first chat"))
+    ws.push(message_for(4, "b", "second chat"))
+    await wait_until(
+        lambda: hub.get(1, 3) is not None and hub.get(1, 4) is not None
+    )
+
+    release.set()
+    done = set()
+    while len(done) < 2:
+        event = await ws.next_event("complete")
+        done.add((event["conversation_id"], event["request_id"]))
+    assert done == {(3, "a"), (4, "b")}
+
+    # Each reply was saved into its own conversation.
+    saved = {call.args[3]: call.args[0] for call in save.await_args_list}
+    assert saved == {3: "first chat", 4: "second chat"}
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_conversation_leaves_the_other_running(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_for(3, "a"))
+    ws.push(message_for(4, "b"))
+    await wait_until(
+        lambda: hub.get(1, 3) is not None and hub.get(1, 4) is not None
+    )
+
+    ws.push({"type": "cancel", "request_id": "a", "conversation_id": 3})
+    cancelled = await ws.next_event("cancelled")
+    assert cancelled["conversation_id"] == 3
+    assert hub.get(1, 4) is not None  # untouched
+
+    release.set()
+    complete = await ws.next_event("complete")
+    assert complete["conversation_id"] == 4
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_reply_is_saved_before_complete_is_announced(monkeypatch):
+    order = []
+    release, state, save = patch_blocking_stream(monkeypatch)
+    save.side_effect = lambda *args: order.append("saved")
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_for(3, "r1"))
+    await ws.next_event("chunk")
+    release.set()
+    await ws.next_event("complete")
+    order.append("complete")
+
+    assert order == ["saved", "complete"]
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_conversation_is_free_again_when_the_reply_finishes(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_for(3, "r1"))
+    await ws.next_event("chunk")
+    release.set()
+    await ws.next_event("complete")
+
+    # No "still answering" ghost: the same conversation accepts a new message.
+    assert hub.get(1, 3) is None
+    ws.push(message_for(3, "r2"))
+    assert (await ws.next_event("start"))["request_id"] == "r2"
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+    await wait_until(lambda: hub.get(1, 3) is None)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_crash_reports_an_error_and_frees_the_conversation(monkeypatch):
+    async def crashing_stream(message, client, model, history):
+        raise RuntimeError("boom")
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(
+        websocket_module, "handle_function_calls", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(websocket_module, "stream_chat_response", crashing_stream)
+    monkeypatch.setattr(websocket_module, "save_conversation", AsyncMock())
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+
+    ws.push(message_for(3, "r1"))
+    error = await ws.next_event("error")
+    assert error["conversation_id"] == 3
+    assert "boom" in error["error"]
+    assert hub.get(1, 3) is None
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_regenerate_keeps_the_old_answer_and_saves_nothing(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    stub = fake_stub()
+    stub.RegenerateConversationMessage = AsyncMock(
+        return_value=SimpleNamespace(user_content="question", history=[])
+    )
+    ws = LiveWebSocket()
+    task = asyncio.create_task(
+        websocket_module.websocket_endpoint(
+            ws, stub, object(), "test-model", user_id=1,
+        )
+    )
+
+    ws.push({
+        "type": "message",
+        "mode": "regenerate",
+        "assistant_message_id": 9,
+        "content": "",
+        "request_id": "r1",
+        "conversation_id": 3,
+    })
+    await ws.next_event("chunk")
+    ws.push({"type": "cancel", "request_id": "r1"})
+    await ws.next_event("cancelled")
+
+    save.assert_not_awaited()  # saving would add a duplicate user message
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_edit_saves_only_the_new_answer_through_the_normal_save(monkeypatch):
+    release, state, save = patch_blocking_stream(monkeypatch)
+    stub = fake_stub()
+    stub.EditConversationMessage = AsyncMock(
+        return_value=SimpleNamespace(user_content="edited question")
+    )
+    ws = LiveWebSocket()
+    task = asyncio.create_task(
+        websocket_module.websocket_endpoint(
+            ws, stub, object(), "test-model", user_id=1,
+        )
+    )
+
+    ws.push({
+        "type": "message",
+        "mode": "edit",
+        "message_id": 5,
+        "content": "edited question",
+        "request_id": "r1",
+        "conversation_id": 3,
+    })
+    await ws.next_event("chunk")
+    release.set()
+    await ws.next_event("complete")
+
+    # The database layer skips the already stored user row (see test_db).
+    assert save.await_args.args[:2] == ("edited question", "Hello")
     ws.disconnect()
     await asyncio.wait_for(task, timeout=1)
