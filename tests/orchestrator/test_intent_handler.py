@@ -82,6 +82,8 @@ def test_native_tools_declare_all_supported_operations():
         "create_task",
         "list_tasks",
         "complete_task",
+        "delete_task",
+        "clear_tasks",
     }
     assert all(
         declaration.parameters.additional_properties is None
@@ -316,6 +318,10 @@ async def test_task_tools_dispatch_to_the_existing_grpc_methods():
         ("update_note", {"note_id": True, "title": "x", "content": "y"}),
         ("search_notes", {"keyword": "  "}),
         ("complete_task", {"task_id": True}),
+        ("delete_task", {"task_id": True}),
+        ("delete_task", {"task_id": 0}),
+        ("delete_task", {}),
+        ("clear_tasks", {"unexpected": True}),
         ("list_tasks", {"unexpected": True}),
     ],
 )
@@ -326,6 +332,8 @@ async def test_invalid_tool_arguments_are_rejected_without_grpc_calls(
         SaveNote=AsyncMock(),
         SearchNotes=AsyncMock(),
         CompleteTask=AsyncMock(),
+        DeleteTask=AsyncMock(),
+        ClearTasks=AsyncMock(),
         ListTasks=AsyncMock(),
     )
 
@@ -512,3 +520,105 @@ async def test_save_conversation():
     assert request.user_content == "Hello"
     assert request.assistant_content == "Hi there!"
     assert request.conversation_id == 42
+
+
+@pytest.mark.asyncio
+async def test_delete_task_removes_one_task_and_reports_the_real_result():
+    stub = SimpleNamespace(
+        DeleteTask=AsyncMock(
+            side_effect=[
+                SimpleNamespace(success=True),
+                SimpleNamespace(success=False),
+            ]
+        )
+    )
+
+    async def run(task_id):
+        return await dispatch_tool_call(
+            "delete_task", {"task_id": task_id}, stub,
+            user_message="delete task", history=[], confirmation_token="t",
+        )
+
+    deleted = await run(4)
+    missing = await run(99)
+
+    assert stub.DeleteTask.await_args_list[0].args[0].task_id == 4
+    assert deleted.response == {
+        "task_id": 4, "success": True, "status": "🗑️ Task deleted",
+    }
+    assert missing.response["success"] is False
+    assert "nothing deleted" in missing.response["status"]
+
+
+@pytest.mark.asyncio
+async def test_clear_tasks_requires_the_prompted_explicit_confirmation():
+    client = gemini_client(
+        function_response(("clear_tasks", {})),
+        function_response(text="I need confirmation first."),
+    )
+    stub = SimpleNamespace(
+        ClearTasks=AsyncMock(return_value=SimpleNamespace(deleted_count=5))
+    )
+
+    reply = await handle_function_calls(
+        "remove all my tasks", client, "test-model", [], stub
+    )
+
+    stub.ClearTasks.assert_not_awaited()  # nothing is deleted on the first ask
+    prompt = reply.splitlines()[-1]
+    assert "confirm clear tasks " in prompt
+    token = prompt.split("confirm clear tasks ", 1)[1].split("`", 1)[0]
+
+    confirmed = await dispatch_tool_call(
+        "clear_tasks",
+        {},
+        stub,
+        user_message=f"confirm clear tasks {token}",
+        history=[{"role": "assistant", "content": reply}],
+        confirmation_token="unused",
+    )
+
+    assert confirmed.response == {
+        "deleted_count": 5,
+        "status": "🗑️ Tasks cleared",
+    }
+    stub.ClearTasks.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_clear_tasks_cannot_be_confirmed_without_a_pending_prompt():
+    stub = SimpleNamespace(
+        ClearTasks=AsyncMock(return_value=SimpleNamespace(deleted_count=1))
+    )
+
+    result = await dispatch_tool_call(
+        "clear_tasks",
+        {},
+        stub,
+        user_message="confirm clear tasks arbitrary",
+        history=[],
+        confirmation_token="one-time-token",
+    )
+
+    assert result.response["confirmation_required"] is True
+    stub.ClearTasks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_notes_confirmation_cannot_confirm_clearing_tasks():
+    stub = SimpleNamespace(
+        ClearTasks=AsyncMock(return_value=SimpleNamespace(deleted_count=3))
+    )
+    notes_prompt = "To confirm deleting all notes, reply exactly `confirm clear notes abc123`."
+
+    result = await dispatch_tool_call(
+        "clear_tasks",
+        {},
+        stub,
+        user_message="confirm clear notes abc123",
+        history=[{"role": "assistant", "content": notes_prompt}],
+        confirmation_token="fresh",
+    )
+
+    assert result.response["confirmation_required"] is True
+    stub.ClearTasks.assert_not_awaited()

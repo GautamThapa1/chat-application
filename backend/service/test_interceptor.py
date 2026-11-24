@@ -178,6 +178,13 @@ def test_conversations_notes_and_tasks_are_isolated(stub):
         chat_pb2.CompleteTaskRequest(task_id=task.task.id),
         metadata=metadata_b,
     ).success
+    assert not stub.DeleteTask(
+        chat_pb2.DeleteTaskRequest(task_id=task.task.id),
+        metadata=metadata_b,
+    ).success
+    assert stub.ClearTasks(
+        chat_pb2.ClearTasksRequest(), metadata=metadata_b
+    ).deleted_count == 0
 
     token_a = stub.Login(
         chat_pb2.LoginRequest(username="alice", password="correct-horse")
@@ -208,6 +215,13 @@ def test_conversations_notes_and_tasks_are_isolated(stub):
     assert stub.ListTasks(
         chat_pb2.ListTasksRequest(), metadata=metadata_a
     ).tasks[0].id == task.task.id
+    # Bob's attempts above did not touch Alice's task; she can delete it herself.
+    assert stub.DeleteTask(
+        chat_pb2.DeleteTaskRequest(task_id=task.task.id), metadata=metadata_a
+    ).success
+    assert not stub.ListTasks(
+        chat_pb2.ListTasksRequest(), metadata=metadata_a
+    ).tasks
 
 
 def test_note_embedding_rpcs_enforce_owner_and_support_semantic_search(stub):
@@ -273,6 +287,14 @@ def test_conversation_endpoints_require_a_valid_session(stub):
     with pytest.raises(grpc.RpcError) as clear_notes:
         stub.ClearNotes(chat_pb2.ClearNotesRequest())
     assert clear_notes.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+    with pytest.raises(grpc.RpcError) as clear_tasks:
+        stub.ClearTasks(chat_pb2.ClearTasksRequest())
+    assert clear_tasks.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+    with pytest.raises(grpc.RpcError) as delete_task:
+        stub.DeleteTask(chat_pb2.DeleteTaskRequest(task_id=1))
+    assert delete_task.value.code() == grpc.StatusCode.UNAUTHENTICATED
 
     with pytest.raises(grpc.RpcError) as invalid:
         stub.GetConversation(

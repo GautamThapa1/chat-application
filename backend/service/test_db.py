@@ -486,6 +486,38 @@ def test_tasks_are_isolated_and_updates_check_owner(owners_db):
 
 
 
+def test_delete_task_and_clear_tasks_are_owner_scoped(owners_db):
+    user_a, user_b = owners_db
+    first = db.create_task(user_a, "First")
+    db.create_task(user_a, "Second")
+    private = db.create_task(user_b, "Private task")
+
+    assert db.delete_task(user_b, first) is False  # not B's task
+    assert len(db.get_tasks(user_a)) == 2
+    assert db.delete_task(user_a, first) is True
+    assert db.delete_task(user_a, first) is False  # already gone
+    assert [task["title"] for task in db.get_tasks(user_a)] == ["Second"]
+
+    assert db.clear_tasks(user_a) == 1
+    assert db.get_tasks(user_a) == []
+    assert db.clear_tasks(user_a) == 0
+    assert [task["id"] for task in db.get_tasks(user_b)] == [private]
+
+
+def test_delete_and_clear_tasks_are_idempotent_with_a_key(owners_db):
+    user_a, _ = owners_db
+    task = db.create_task(user_a, "Once")
+    db.create_task(user_a, "Twice")
+
+    first = db.delete_task_idempotent(user_a, task, "delete-key")
+    repeat = db.delete_task_idempotent(user_a, task, "delete-key")
+    assert first == repeat == {"success": True}  # a retry repeats the original answer
+
+    cleared = db.clear_tasks_idempotent(user_a, "clear-tasks-key")
+    retried = db.clear_tasks_idempotent(user_a, "clear-tasks-key")
+    assert cleared == retried == {"deleted_count": 1}
+
+
 def test_conversations_messages_and_deletion_are_owner_scoped(owners_db):
     user_a, user_b = owners_db
 
