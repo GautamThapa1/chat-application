@@ -1,11 +1,67 @@
+# Whole stack:  docker compose up --build
+# Only Qdrant (for running the Python services directly on your machine):
+#               docker compose up -d qdrant
+#
+# Secrets come from a `.env` file next to this file (see .env.example).
+
 services:
   qdrant:
-    # Run one local Qdrant instance on the loopback interface and persist data.
     image: qdrant/qdrant:latest
+    restart: unless-stopped
+    # Published on loopback only, so `make service` on the host can reach it.
     ports:
       - "127.0.0.1:6333:6333"
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  # gRPC ChatService + SQLite database + note-embedding worker.
+  service:
+    build: .
+    image: chat-app:local
+    restart: unless-stopped
+    command: ["python", "-m", "backend.service.main"]
+    environment:
+      DATABASE_KEY: ${DATABASE_KEY:?Set DATABASE_KEY in .env}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      QDRANT_URL: http://qdrant:6333
+      GRPC_BIND: 0.0.0.0   # reachable from the "app" container only (no ports: published)
+      DB_PATH: /data/app.db
+    volumes:
+      - app_data:/data
+    depends_on:
+      - qdrant
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; grpc.channel_ready_future(grpc.insecure_channel('127.0.0.1:50051')).result(timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # FastAPI + WebSocket + the static frontend.
+  app:
+    image: chat-app:local
+    restart: unless-stopped
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      GEMINI_MAX_INPUT_TOKENS: ${GEMINI_MAX_INPUT_TOKENS:-24000}
+      GRPC_TARGET: service:50051
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+    ports:
+      - "8000:8000"
+    depends_on:
+      service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 volumes:
   qdrant_storage:
+  app_data:
