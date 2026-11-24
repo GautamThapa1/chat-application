@@ -365,6 +365,24 @@
 
       .message.assistant .bubble { padding: 4px 0; }
 
+      .tool-results { display: grid; gap: 8px; }
+      .tool-result {
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--bg-soft);
+      }
+      .tool-result-title { color: var(--muted); font-size: 0.82em; font-weight: 600; text-transform: capitalize; }
+      .tool-result-content {
+        max-height: 12rem;
+        margin: 6px 0 0;
+        overflow: auto;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: inherit;
+        font-size: 0.82em;
+      }
+
       /* Action buttons are always in the DOM and visible: no hover, no timers. */
       .actions {
         display: flex;

@@ -72,6 +72,7 @@ class Generation:
     prompt: str  # what the user asked (normal messages are saved only at the end)
     assistant_message_id: int | None = None  # set when regenerating
     chunks: list[str] = field(default_factory=list)
+    tool_results: list[dict] = field(default_factory=list)
     task: asyncio.Task | None = None
 
     @property
@@ -124,6 +125,7 @@ class GenerationHub:
                     "prompt": gen.prompt,
                     "assistant_message_id": gen.assistant_message_id,
                     "content": gen.text,
+                    "tool_results": gen.tool_results,
                 }
                 for (uid, _), gen in self._generations.items()
                 if uid == user_id
@@ -187,6 +189,12 @@ async def _run_generation(
             **fields,
         })
 
+    async def emit_tool_result(tool: str, result: dict) -> None:
+        tool_result = {"tool": tool, "result": result}
+        index = len(gen.tool_results)
+        gen.tool_results.append(tool_result)
+        await emit("tool_result", index=index, **tool_result)
+
     terminal: tuple[str, dict] | None = None
     cancelled = False
     try:
@@ -238,7 +246,12 @@ async def _run_generation(
 
         await emit("start", role="assistant")
         tool_response = await handle_function_calls(
-            message, gemini_client, model, history, stub,
+            message,
+            gemini_client,
+            model,
+            history,
+            stub,
+            on_tool_result=emit_tool_result,
         )
 
         if tool_response is None:

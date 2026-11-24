@@ -232,9 +232,98 @@ test("stale and duplicate events are ignored", async () => {
   page.socket.serverSend({ type: "chunk", conversation_id: 1, request_id, content: "Hi", offset: 0 });
   page.socket.serverSend({ type: "chunk", conversation_id: 1, request_id, content: "Hi", offset: 0 }); // duplicate
   page.socket.serverSend({ type: "chunk", conversation_id: 1, request_id: "old-request", content: "STALE", offset: 0 });
+  page.socket.serverSend({
+    type: "tool_result",
+    conversation_id: 1,
+    request_id: "old-request",
+    index: 0,
+    tool: "create_task",
+    result: { status: "STALE" },
+  });
 
   const streaming = page.$$(".message.assistant .bubble").pop().textContent;
   assert.equal(streaming, "Hi");
+  assert.equal(page.$(".tool-results"), null);
+});
+
+test("tool results stream separately from assistant text and remain visible on completion", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  await page.send("create a task");
+  const { request_id } = page.socket.sentOfType("message")[0];
+
+  page.socket.serverSend({
+    type: "tool_result",
+    conversation_id: 1,
+    request_id,
+    index: 0,
+    tool: "create_task",
+    result: { task_id: 7, status: "📌 Task added" },
+  });
+  assert.match(page.$(".tool-result-content").textContent, /Task added/);
+  assert.doesNotMatch(
+    page.$$(".message.assistant .bubble").pop().textContent,
+    /Task added/,
+  );
+
+  page.socket.serverSend({
+    type: "chunk",
+    conversation_id: 1,
+    request_id,
+    content: "Task created.",
+    offset: 0,
+  });
+  assert.equal(page.$$(".message.assistant .bubble").pop().textContent, "Task created.");
+
+  page.db.messages[1].push(
+    { message_id: 13, conversation_id: 1, role: "user", content: "create a task" },
+    { message_id: 14, conversation_id: 1, role: "assistant", content: "Task created." },
+  );
+  page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
+  await tick(20);
+
+  assert.match(page.$(".tool-result-content").textContent, /Task added/);
+  assert.equal(page.$$(".message.assistant .bubble").at(-1).textContent, "Task created.");
+});
+
+test("tool results remain visible if the assistant response is cancelled or errors", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+
+  await page.send("create a task");
+  let { request_id } = page.socket.sentOfType("message").at(-1);
+  page.socket.serverSend({
+    type: "tool_result",
+    conversation_id: 1,
+    request_id,
+    index: 0,
+    tool: "create_task",
+    result: { task_id: 7, status: "📌 Task added" },
+  });
+  page.socket.serverSend({ type: "cancelled", conversation_id: 1, request_id });
+  await tick(20);
+  assert.match(page.$(".tool-result-content").textContent, /Task added/);
+  assert.match(page.$(".notice").textContent, /Stopped/);
+
+  await page.send("create another task");
+  request_id = page.socket.sentOfType("message").at(-1).request_id;
+  page.socket.serverSend({
+    type: "tool_result",
+    conversation_id: 1,
+    request_id,
+    index: 0,
+    tool: "create_task",
+    result: { task_id: 8, status: "📌 Task added" },
+  });
+  page.socket.serverSend({
+    type: "error",
+    conversation_id: 1,
+    request_id,
+    error: "Tool follow-up failed",
+  });
+  await tick(20);
+  assert.match(page.$(".tool-result-content").textContent, /task_id.*8/s);
+  assert.match(page.$(".notice.error").textContent, /Tool follow-up failed/);
 });
 
 test("Edit and Regenerate are on every saved message immediately, no hover needed", async () => {
@@ -303,8 +392,13 @@ test("after a reconnect the page re-syncs a reply that kept running", async () =
     generations: [{
       conversation_id: 1, request_id, mode: "message", prompt: "hello",
       assistant_message_id: null, content: "Partial so far",
+      tool_results: [{
+        tool: "create_task",
+        result: { task_id: 7, status: "📌 Task added" },
+      }],
     }],
   });
   assert.match(page.threadText(), /Partial so far/);
+  assert.match(page.$(".tool-result-content").textContent, /Task added/);
   assert.ok(page.sidebarItem("Chat A").querySelector(".spinner"));
 });

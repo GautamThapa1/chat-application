@@ -381,6 +381,12 @@ async def test_multiple_tool_calls_are_executed_and_results_returned_to_gemini()
         ),
         ListTasks=AsyncMock(return_value=SimpleNamespace(tasks=[])),
     )
+    streamed_results = []
+
+    async def on_tool_result(tool, result):
+        streamed_results.append((tool, result))
+        if tool == "save_note":
+            stub.ListTasks.assert_not_awaited()
 
     result = await handle_function_calls(
         "Save a note and show my tasks",
@@ -388,9 +394,18 @@ async def test_multiple_tool_calls_are_executed_and_results_returned_to_gemini()
         "test-model",
         [],
         stub,
+        on_tool_result=on_tool_result,
     )
 
     assert result == "I saved the note and listed your tasks."
+    assert streamed_results == [
+        ("save_note", {
+            "note_id": 3,
+            "title": "Plan",
+            "status": "📝 Note added",
+        }),
+        ("list_tasks", {"tasks": []}),
+    ]
     assert stub.SaveNote.await_count == 1
     assert stub.ListTasks.await_count == 1
     second_request = client.models.generate_content.await_args_list[1].kwargs

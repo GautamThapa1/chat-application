@@ -86,6 +86,7 @@ function chatState(conversationId) {
     chat = {
       messages: [],
       generation: null,
+      toolResults: [],
       loaded: false,
       notice: "",
       noticeIsError: false,
@@ -477,6 +478,18 @@ function handleServerEvent(msg) {
       if (conversationId === activeConversationId) paintStream(gen);
       break;
 
+    case "tool_result":
+      if (!isCurrent) {
+        wsSend({ type: "sync" });
+        break;
+      }
+      if (!Number.isInteger(msg.index) || msg.index < 0 || typeof msg.tool !== "string") {
+        break;
+      }
+      chat.toolResults[msg.index] = { tool: msg.tool, result: msg.result };
+      if (conversationId === activeConversationId) renderThread();
+      break;
+
     case "complete":
     case "cancelled":
       if (gen !== null && !isCurrent) break; // an old reply's event: ignore
@@ -500,6 +513,7 @@ function reconcileActive(list) {
   for (const item of list) {
     runningIds.add(item.conversation_id);
     const chat = chatState(item.conversation_id);
+    chat.toolResults = Array.isArray(item.tool_results) ? item.tool_results : [];
     chat.generation = {
       requestId: item.request_id,
       mode: item.mode,
@@ -829,6 +843,7 @@ async function submitMessage(text) {
   chat.generation = {
     requestId, mode: "message", prompt: text, assistantMessageId: null, text: "", finishing: false,
   };
+  chat.toolResults = [];
   setNotice(chat, "");
   stickToBottom = true;
   renderAll();
@@ -870,6 +885,7 @@ function sendEdit(chat, message, newText) {
   chat.generation = {
     requestId, mode: "edit", prompt: newText, assistantMessageId: null, text: "", finishing: false,
   };
+  chat.toolResults = [];
   setNotice(chat, "");
   stickToBottom = true;
   renderAll();
@@ -895,6 +911,7 @@ function sendRegenerate(chat, message) {
   chat.generation = {
     requestId, mode: "regenerate", prompt: "", assistantMessageId: message.message_id, text: "", finishing: false,
   };
+  chat.toolResults = [];
   setNotice(chat, "");
   stickToBottom = true;
   renderAll();
@@ -1015,8 +1032,10 @@ function renderThread() {
         chat, { message_id: null, role: "user", content: gen.prompt }, { busy: true, isLast: false },
       ));
     }
-    threadEl.appendChild(renderStreamingMessage(gen));
   }
+  const toolResults = chat.toolResults.filter(Boolean);
+  if (toolResults.length) threadEl.appendChild(renderToolResults(toolResults));
+  if (gen) threadEl.appendChild(renderStreamingMessage(gen));
 
   if (chat.notice) {
     threadEl.appendChild(el("div", chat.noticeIsError ? "notice error" : "notice", chat.notice));
@@ -1146,6 +1165,23 @@ function renderStreamingMessage(gen) {
   streamBubble = bubble;
   paintStream(gen);
   return row;
+}
+
+function renderToolResults(results) {
+  const section = el("div", "tool-results");
+  section.setAttribute("aria-label", "Tool results");
+  for (const item of results) {
+    const name = typeof item.tool === "string" ? item.tool.replace(/_/g, " ") : "tool";
+    const result = el("div", "tool-result");
+    result.appendChild(el("div", "tool-result-title", `Tool result · ${name}`));
+    result.appendChild(el(
+      "pre",
+      "tool-result-content",
+      JSON.stringify(item.result, null, 2) ?? String(item.result),
+    ));
+    section.appendChild(result);
+  }
+  return section;
 }
 
 // Cheap update used for every chunk: only the live bubble is touched.

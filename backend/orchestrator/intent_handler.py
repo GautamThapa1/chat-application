@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -235,6 +236,9 @@ _TOOL_FIELDS = {
 class ToolExecutionResult:
     response: dict[str, Any]
     confirmation_prompt: str | None = None
+
+
+ToolResultCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 def _validate_arguments(name: str, arguments: Any) -> dict[str, Any]:
@@ -531,6 +535,8 @@ async def _continue_function_calls(
     contents: list[types.Content],
     content: types.Content,
     calls: list[types.FunctionCall],
+    *,
+    on_tool_result: ToolResultCallback | None = None,
 ) -> str:
     confirmation_token = secrets.token_urlsafe(8)
     confirmation_prompt = None
@@ -552,6 +558,8 @@ async def _continue_function_calls(
                 confirmation_token=confirmation_token,
                 gemini_client=gemini_client,
             )
+            if on_tool_result is not None:
+                await on_tool_result(call.name, result.response)
             if result.confirmation_prompt:
                 confirmation_prompt = result.confirmation_prompt
             tool_responses.append(
@@ -587,6 +595,8 @@ async def handle_function_calls(
     model: str,
     history: list[dict[str, str]],
     stub,
+    *,
+    on_tool_result: ToolResultCallback | None = None,
 ) -> str | None:
     """Return a tool-based reply, or None when the request is normal chat."""
     contents = await bounded_contents(message, gemini_client, model, history)
@@ -611,6 +621,7 @@ async def handle_function_calls(
             contents,
             content,
             calls,
+            on_tool_result=on_tool_result,
         )
     )
     try:

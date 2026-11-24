@@ -163,13 +163,15 @@ async def test_websocket_streams_chat_and_saves_response(monkeypatch):
 
     assert chunks == ["Hello", " there!"]
 
-    handle_tools.assert_awaited_once_with(
+    assert handle_tools.await_count == 1
+    assert handle_tools.await_args.args == (
         "Hello",
         gemini_client,
         "test-model",
         [{"role": "user", "content": "Earlier question"}],
         stub,
     )
+    assert callable(handle_tools.await_args.kwargs["on_tool_result"])
 
     save.assert_awaited_once_with(
         "Hello",
@@ -192,7 +194,17 @@ async def test_websocket_handles_action_request(monkeypatch):
         create_message("Save a note about my meeting")
     ])
 
-    handle_tools = AsyncMock(return_value="Note saved successfully")
+    tool_result = {
+        "note_id": 5,
+        "title": "Meeting",
+        "status": "📝 Note added",
+    }
+
+    async def handle_tools(*args, on_tool_result):
+        await on_tool_result("save_note", tool_result)
+        return "Note saved successfully"
+
+    handle_tools = AsyncMock(side_effect=handle_tools)
     save = AsyncMock()
 
     stream_calls = []
@@ -221,19 +233,30 @@ async def test_websocket_handles_action_request(monkeypatch):
 
     assert [event["type"] for event in events] == [
         "start",
+        "tool_result",
         "chunk",
         "complete",
     ]
 
-    assert events[1]["content"] == "Note saved successfully"
+    assert events[1] == {
+        "type": "tool_result",
+        "conversation_id": 3,
+        "request_id": "request-1",
+        "index": 0,
+        "tool": "save_note",
+        "result": tool_result,
+    }
+    assert events[2]["content"] == "Note saved successfully"
 
-    handle_tools.assert_awaited_once_with(
+    assert handle_tools.await_count == 1
+    assert handle_tools.await_args.args == (
         "Save a note about my meeting",
         gemini_client,
         "test-model",
         [],
         stub,
     )
+    assert callable(handle_tools.await_args.kwargs["on_tool_result"])
 
     assert stream_calls == []
 
@@ -560,7 +583,9 @@ async def test_cancel_before_any_text_saves_nothing(monkeypatch):
     save = AsyncMock()
     gate = asyncio.Event()
 
-    async def slow_tool_selection(message, client, model, history, stub):
+    async def slow_tool_selection(
+        message, client, model, history, stub, *, on_tool_result
+    ):
         await gate.wait()
 
     monkeypatch.setattr(
@@ -673,6 +698,9 @@ async def test_an_action_is_not_cut_off_by_cancel(monkeypatch):
     await asyncio.sleep(0.01)
     gate.set()
 
+    tool_result = await ws.next_event("tool_result")
+    assert tool_result["tool"] == "create_task"
+    assert tool_result["result"]["status"] == "📌 Task added"
     chunk = await ws.next_event("chunk")
     assert chunk["content"] == "Task created."
     assert (await ws.next_event("complete"))["request_id"] == "r1"
@@ -830,6 +858,7 @@ async def test_new_connection_can_resync_a_running_reply(monkeypatch):
         "prompt": "what is 2+2",
         "assistant_message_id": None,
         "content": "Hel",
+        "tool_results": [],
     }]
 
     # ...and the new socket receives the rest of the reply and the finish.
@@ -837,6 +866,67 @@ async def test_new_connection_can_resync_a_running_reply(monkeypatch):
     rest = await second.next_event("chunk")
     assert (rest["content"], rest["offset"]) == ("lo", 3)
     assert (await second.next_event("complete"))["conversation_id"] == 3
+    save.assert_awaited_once()
+
+    second.disconnect()
+    await asyncio.wait_for(second_task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_tool_results_resync_and_continue_after_client_disconnect(monkeypatch):
+    first_result_ready = asyncio.Event()
+    second_result_ready = asyncio.Event()
+    finish = asyncio.Event()
+    started = asyncio.Event()
+    save = AsyncMock()
+    first_result = {"task_id": 9, "status": "📌 Task added"}
+    second_result = {"tasks": [{"id": 9, "title": "Task"}]}
+
+    async def handle_tools(
+        message, client, model, history, stub, *, on_tool_result
+    ):
+        started.set()
+        await first_result_ready.wait()
+        await on_tool_result("create_task", first_result)
+        await second_result_ready.wait()
+        await on_tool_result("list_tasks", second_result)
+        await finish.wait()
+        return "Task created."
+
+    monkeypatch.setattr(websocket_module, "handle_function_calls", handle_tools)
+    monkeypatch.setattr(websocket_module, "save_conversation", save)
+
+    first = LiveWebSocket()
+    first_task = start_endpoint(first)
+    first.push(message_for(3, "r1"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    first.disconnect()
+    await asyncio.wait_for(first_task, timeout=1)
+
+    first_result_ready.set()
+    await wait_until(
+        lambda: hub.get(1, 3) is not None
+        and len(hub.get(1, 3).tool_results) == 1
+    )
+
+    second = LiveWebSocket()
+    second_task = start_endpoint(second)
+    second.push({"type": "sync"})
+    active = await second.next_event("active")
+    assert active["generations"][0]["tool_results"] == [{
+        "tool": "create_task",
+        "result": first_result,
+    }]
+
+    second_result_ready.set()
+    streamed = await second.next_event("tool_result")
+    assert streamed["index"] == 1
+    assert streamed["tool"] == "list_tasks"
+    assert streamed["result"] == second_result
+
+    finish.set()
+    assert (await second.next_event("chunk"))["content"] == "Task created."
+    assert (await second.next_event("complete"))["request_id"] == "r1"
     save.assert_awaited_once()
 
     second.disconnect()
@@ -953,6 +1043,35 @@ async def test_conversation_is_free_again_when_the_reply_finishes(monkeypatch):
     ws.disconnect()
     await asyncio.wait_for(task, timeout=1)
     await wait_until(lambda: hub.get(1, 3) is None)
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_reports_error_after_prior_tool_result(monkeypatch):
+    async def failing_tools(message, client, model, history, stub, *, on_tool_result):
+        await on_tool_result("create_task", {
+            "task_id": 9,
+            "status": "📌 Task added",
+        })
+        raise ValueError("the next tool failed")
+
+    monkeypatch.setattr(websocket_module, "handle_function_calls", failing_tools)
+    save = AsyncMock()
+    monkeypatch.setattr(websocket_module, "save_conversation", save)
+    ws = LiveWebSocket()
+    task = start_endpoint(ws)
+    ws.push(message_for(3, "r1"))
+
+    assert (await ws.next_event())["type"] == "start"
+    result = await ws.next_event("tool_result")
+    assert result["result"]["task_id"] == 9
+    error = await ws.next_event("error")
+    assert error["request_id"] == "r1"
+    assert "next tool failed" in error["error"]
+    assert hub.get(1, 3) is None
+    save.assert_not_awaited()
+
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=1)
 
 
 @pytest.mark.asyncio
