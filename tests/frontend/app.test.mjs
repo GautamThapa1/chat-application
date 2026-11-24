@@ -5,7 +5,7 @@
 // The fake WebSocket lets a test play the server: it records what the page
 // sends and lets the test push events (chunk, complete, ...) back.
 
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -18,6 +18,12 @@ const html = readFileSync(join(root, "index.html"), "utf8").replace(
   "",
 );
 const appJs = readFileSync(join(root, "app.js"), "utf8");
+const openWindows = new Set();
+
+afterEach(() => {
+  for (const window of openWindows) window.close();
+  openWindows.clear();
+});
 
 const tick = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -25,6 +31,7 @@ const tick = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms));
 async function boot({ username = "Gautam", db } = {}) {
   const dom = new JSDOM(html, { runScripts: "outside-only", url: "http://localhost:8000/" });
   const { window } = dom;
+  openWindows.add(window);
   const sockets = [];
 
   class FakeWebSocket {
