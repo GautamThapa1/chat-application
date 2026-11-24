@@ -25,7 +25,7 @@ from backend.orchestrator.websocket import websocket_endpoint
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 levels above
 
-GRPC_TARGET = "127.0.0.1:50051"
+DEFAULT_GRPC_TARGET = "127.0.0.1:50051"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 
@@ -35,7 +35,8 @@ async def lifespan(app: FastAPI): # lifespan: manages the gRPC object and channe
     if not api_key:
         raise RuntimeError("Set GEMINI_API_KEY before starting the orchestrator.")
 
-    channel = grpc.aio.insecure_channel(GRPC_TARGET) # TODO: make it secure later for production
+    grpc_target = os.getenv("GRPC_TARGET", DEFAULT_GRPC_TARGET)
+    channel = grpc.aio.insecure_channel(grpc_target) # TODO: make it secure later for production
     app.state.grpc_stub = chat_pb2_grpc.ChatServiceStub(channel) # stub object of orchestrator
 
     # for gemini cleint
