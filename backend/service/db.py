@@ -1356,6 +1356,40 @@ def clear_notes(user_id: int) -> int:
         conn.close()
 
 
+def delete_note(user_id: int, note_id: int) -> bool:
+    """Delete one owned note and its searchable vector."""
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            note = conn.execute(
+                "SELECT id FROM notes WHERE id = ? AND user_id = ?",
+                (note_id, user_id),
+            ).fetchone()
+            if note is None:
+                return False
+
+            indexed = conn.execute(
+                """SELECT collection FROM note_embedding_index
+                     WHERE note_id = ? AND user_id = ?""",
+                (note_id, user_id),
+            ).fetchone()
+            if indexed is not None:
+                note_vector_index.delete_points(indexed["collection"], [note_id])
+            if _table_exists(conn, "note_embeddings_legacy"):
+                conn.execute(
+                    "DELETE FROM note_embeddings_legacy WHERE note_id = ?",
+                    (note_id,),
+                )
+            deleted = conn.execute(
+                "DELETE FROM notes WHERE id = ? AND user_id = ?",
+                (note_id, user_id),
+            )
+            return deleted.rowcount > 0
+    finally:
+        conn.close()
+
+
 def clear_notes_in_transaction(conn, user_id: int) -> dict:
     if conn is None:
         return {"deleted_count": clear_notes(user_id)}

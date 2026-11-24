@@ -404,6 +404,51 @@ def test_clear_notes_deletes_only_the_owners_notes(owners_db):
     assert db.clear_notes(user_a) == 0
 
 
+def test_delete_note_is_owner_scoped_and_cleans_up_its_vector(owners_db, monkeypatch):
+    user_a, user_b = owners_db
+    note_id = db.save_note(user_a, "Project", "A stable project context")
+    other_note_id = db.save_note(user_b, "Private", "Another user's memory")
+    content_hash = note_content_hash("Project", "A stable project context")
+    assert db.upsert_note_embedding(
+        user_a, note_id, [1.0, 0.0], "test-model", content_hash
+    )
+
+    deleted_points = []
+    delete_points = db.note_vector_index.delete_points
+
+    def record_delete(collection, note_ids):
+        deleted_points.append((collection, list(note_ids)))
+        return delete_points(collection, note_ids)
+
+    monkeypatch.setattr(db.note_vector_index, "delete_points", record_delete)
+
+    assert not db.delete_note(user_b, note_id)
+    assert db.delete_note(user_a, note_id)
+    assert not db.delete_note(user_a, note_id)
+    assert len(deleted_points) == 1
+    assert deleted_points[0][1] == [note_id]
+    assert db.search_notes(user_a, "stable project") == []
+    assert [note["id"] for note in db.search_notes(user_b, "memory")] == [
+        other_note_id
+    ]
+    assert not db.upsert_note_embedding(
+        user_a, note_id, [1.0, 0.0], "test-model", content_hash
+    )
+
+    conn = db.get_connection()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM note_embedding_index WHERE note_id = ?",
+            (note_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM note_embedding_jobs WHERE note_id = ?",
+            (note_id,),
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_legacy_sql_vectors_are_moved_to_qdrant_without_reembedding(
     owners_db, monkeypatch,
 ):

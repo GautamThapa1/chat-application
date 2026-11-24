@@ -156,6 +156,14 @@ message UpdateNoteResponse {
   Note note = 1;
 }
 
+message DeleteNoteRequest {
+  int64 note_id = 1;
+}
+
+message DeleteNoteResponse {
+  bool success = 1;
+}
+
 message SearchNotesRequest {
   string keyword = 1;
 }
@@ -293,6 +301,7 @@ service ChatService {
 
   rpc SaveNote(SaveNoteRequest)         returns (SaveNoteResponse);
   rpc UpdateNote(UpdateNoteRequest)     returns (UpdateNoteResponse);
+  rpc DeleteNote(DeleteNoteRequest) returns (DeleteNoteResponse);
   rpc SearchNotes(SearchNotesRequest)   returns (SearchNotesResponse);
   rpc SearchNotesHybrid(SearchNotesHybridRequest) returns (SearchNotesResponse);
   rpc UpsertNoteEmbedding(UpsertNoteEmbeddingRequest) returns (UpsertNoteEmbeddingResponse);

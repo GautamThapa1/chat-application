@@ -71,6 +71,7 @@ async function boot({ username = "Gautam", db } = {}) {
       ],
     },
   };
+  db.deletedNoteIds ??= [];
 
   const json = (data, status = 200) => Promise.resolve({
     ok: status < 400, status, json: () => Promise.resolve(data),
@@ -98,6 +99,12 @@ async function boot({ username = "Gautam", db } = {}) {
       db.conversations.unshift(created);
       db.messages[id] = [];
       return json({ conversation: created }, 201);
+    }
+    const noteMatch = path.match(/^\/api\/notes\/(\d+)$/);
+    if (noteMatch && method === "DELETE") {
+      if (db.deleteNoteError) return json({ detail: db.deleteNoteError }, 503);
+      db.deletedNoteIds.push(Number(noteMatch[1]));
+      return json({ ok: true });
     }
     return json({ detail: "not found" }, 404);
   };
@@ -246,10 +253,10 @@ test("stale and duplicate events are ignored", async () => {
   assert.equal(page.$(".tool-results"), null);
 });
 
-test("tool results stream separately from assistant text and remain visible on completion", async () => {
+test("internal search results stay hidden while the assistant reply remains visible", async () => {
   const page = await boot();
   await page.open("Chat A");
-  await page.send("create a task");
+  await page.send("how do I prefer answers?");
   const { request_id } = page.socket.sentOfType("message")[0];
 
   page.socket.serverSend({
@@ -257,36 +264,103 @@ test("tool results stream separately from assistant text and remain visible on c
     conversation_id: 1,
     request_id,
     index: 0,
-    tool: "create_task",
-    result: { task_id: 7, status: "📌 Task added" },
+    tool: "search_notes",
+    result: {
+      notes: [{
+        title: "Memory: Answer style",
+        content: "The user prefers concise answers.",
+      }],
+    },
   });
-  assert.match(page.$(".tool-result-content").textContent, /Task added/);
-  assert.doesNotMatch(
-    page.$$(".message.assistant .bubble").pop().textContent,
-    /Task added/,
-  );
+  assert.equal(page.$(".tool-results"), null);
+  assert.doesNotMatch(page.threadText(), /Memory: Answer style|prefers concise answers/);
 
   page.socket.serverSend({
     type: "chunk",
     conversation_id: 1,
     request_id,
-    content: "Task created.",
+    content: "I'll keep my replies concise.",
     offset: 0,
   });
-  assert.equal(page.$$(".message.assistant .bubble").pop().textContent, "Task created.");
+  assert.match(page.threadText(), /I'll keep my replies concise/);
 
   page.db.messages[1].push(
-    { message_id: 13, conversation_id: 1, role: "user", content: "create a task" },
-    { message_id: 14, conversation_id: 1, role: "assistant", content: "Task created." },
+    { message_id: 13, conversation_id: 1, role: "user", content: "how do I prefer answers?" },
+    { message_id: 14, conversation_id: 1, role: "assistant", content: "I'll keep my replies concise." },
   );
   page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
   await tick(20);
 
-  assert.match(page.$(".tool-result-content").textContent, /Task added/);
-  assert.equal(page.$$(".message.assistant .bubble").at(-1).textContent, "Task created.");
+  assert.equal(page.$(".tool-results"), null);
+  assert.equal(page.$$(".message.assistant .bubble").at(-1).textContent, "I'll keep my replies concise.");
 });
 
-test("tool results remain visible if the assistant response is cancelled or errors", async () => {
+test("saved memories show an undo action and remove the note", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  await page.send("I prefer concise answers");
+  const { request_id } = page.socket.sentOfType("message")[0];
+
+  page.socket.serverSend({
+    type: "tool_result",
+    conversation_id: 1,
+    request_id,
+    index: 0,
+    tool: "save_memory",
+    result: {
+      note_id: 42,
+      title: "Memory: Answer style",
+      content: "The user prefers concise answers.",
+      status: "🧠 Memory saved",
+    },
+  });
+
+  assert.match(page.threadText(), /Remembered this/);
+  assert.match(page.threadText(), /prefers concise answers/);
+  page.$(".tool-result button").click();
+  await tick(20);
+
+  assert.deepEqual(page.db.deletedNoteIds, [42]);
+  assert.match(page.threadText(), /Memory removed/);
+  assert.equal(page.$(".tool-result button"), null);
+});
+
+test("memory undo errors are shown and can be retried", async () => {
+  const page = await boot();
+  page.db.deleteNoteError = "Service temporarily unavailable.";
+  await page.open("Chat A");
+  await page.send("I prefer concise answers");
+  const { request_id } = page.socket.sentOfType("message")[0];
+  page.socket.serverSend({
+    type: "tool_result",
+    conversation_id: 1,
+    request_id,
+    index: 0,
+    tool: "save_memory",
+    result: {
+      note_id: 42,
+      title: "Memory: Answer style",
+      content: "Concise answers.",
+      status: "🧠 Memory saved",
+    },
+  });
+
+  page.$(".tool-result button").click();
+  await tick(20);
+
+  assert.match(page.threadText(), /Could not undo memory/);
+  assert.ok(page.$(".tool-result button"), "the undo action remains retryable");
+
+  page.db.deleteNoteError = null;
+  page.$(".tool-result button").click();
+  await tick(20);
+
+  assert.deepEqual(page.db.deletedNoteIds, [42]);
+  assert.doesNotMatch(page.threadText(), /Could not undo memory/);
+  assert.match(page.threadText(), /Memory removed/);
+});
+
+test("internal tool results stay hidden if the assistant response is cancelled or errors", async () => {
   const page = await boot();
   await page.open("Chat A");
 
@@ -302,7 +376,8 @@ test("tool results remain visible if the assistant response is cancelled or erro
   });
   page.socket.serverSend({ type: "cancelled", conversation_id: 1, request_id });
   await tick(20);
-  assert.match(page.$(".tool-result-content").textContent, /Task added/);
+  assert.equal(page.$(".tool-results"), null);
+  assert.doesNotMatch(page.threadText(), /Task added/);
   assert.match(page.$(".notice").textContent, /Stopped/);
 
   await page.send("create another task");
@@ -322,7 +397,8 @@ test("tool results remain visible if the assistant response is cancelled or erro
     error: "Tool follow-up failed",
   });
   await tick(20);
-  assert.match(page.$(".tool-result-content").textContent, /task_id.*8/s);
+  assert.equal(page.$(".tool-results"), null);
+  assert.doesNotMatch(page.threadText(), /task_id.*8|Task added/s);
   assert.match(page.$(".notice.error").textContent, /Tool follow-up failed/);
 });
 
@@ -399,6 +475,7 @@ test("after a reconnect the page re-syncs a reply that kept running", async () =
     }],
   });
   assert.match(page.threadText(), /Partial so far/);
-  assert.match(page.$(".tool-result-content").textContent, /Task added/);
+  assert.equal(page.$(".tool-results"), null);
+  assert.doesNotMatch(page.threadText(), /Task added/);
   assert.ok(page.sidebarItem("Chat A").querySelector(".spinner"));
 });

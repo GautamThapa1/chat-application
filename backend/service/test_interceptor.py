@@ -278,6 +278,23 @@ def test_note_embedding_rpcs_enforce_owner_and_support_semantic_search(stub):
         metadata=metadata_a,
     ).notes[0].id == note.id
 
+    assert not stub.DeleteNote(
+        chat_pb2.DeleteNoteRequest(note_id=note.id),
+        metadata=metadata_b,
+    ).success
+    assert stub.SearchNotes(chat_pb2.SearchNotesRequest(), metadata=metadata_a).notes
+    assert stub.DeleteNote(
+        chat_pb2.DeleteNoteRequest(note_id=note.id),
+        metadata=metadata_a,
+    ).success
+    assert not stub.SearchNotesHybrid(
+        chat_pb2.SearchNotesHybridRequest(
+            embedding=[1.0, 0.0],
+            embedding_model="test-model",
+        ),
+        metadata=metadata_a,
+    ).notes
+
 
 def test_conversation_endpoints_require_a_valid_session(stub):
     with pytest.raises(grpc.RpcError) as missing:
@@ -295,6 +312,10 @@ def test_conversation_endpoints_require_a_valid_session(stub):
     with pytest.raises(grpc.RpcError) as delete_task:
         stub.DeleteTask(chat_pb2.DeleteTaskRequest(task_id=1))
     assert delete_task.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+    with pytest.raises(grpc.RpcError) as delete_note:
+        stub.DeleteNote(chat_pb2.DeleteNoteRequest(note_id=1))
+    assert delete_note.value.code() == grpc.StatusCode.UNAUTHENTICATED
 
     with pytest.raises(grpc.RpcError) as invalid:
         stub.GetConversation(

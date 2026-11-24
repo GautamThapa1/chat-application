@@ -75,6 +75,7 @@ def test_native_tools_declare_all_supported_operations():
     declarations = TOOL_CONFIG.tools[0].function_declarations
     assert {declaration.name for declaration in declarations} == {
         "save_note",
+        "save_memory",
         "update_note",
         "search_notes",
         "list_notes",
@@ -117,6 +118,42 @@ async def test_save_note_dispatch_validates_and_maps_arguments():
     }
     request = stub.SaveNote.await_args.args[0]
     assert (request.title, request.content) == ("Meeting", "Discuss launch")
+
+
+@pytest.mark.asyncio
+async def test_save_memory_uses_notes_and_returns_undo_details():
+    stub = SimpleNamespace(
+        SaveNote=AsyncMock(
+            return_value=SimpleNamespace(
+                note=SimpleNamespace(
+                    id=4,
+                    title="Memory: Answer style",
+                    content="The user prefers concise answers.",
+                )
+            )
+        )
+    )
+
+    result = await dispatch_tool_call(
+        "save_memory",
+        {"title": "Answer style", "content": "The user prefers concise answers."},
+        stub,
+        user_message="I prefer concise answers.",
+        history=[],
+        confirmation_token="unused",
+    )
+
+    request = stub.SaveNote.await_args.args[0]
+    assert (request.title, request.content) == (
+        "Memory: Answer style",
+        "The user prefers concise answers.",
+    )
+    assert result.response == {
+        "note_id": 4,
+        "title": "Memory: Answer style",
+        "content": "The user prefers concise answers.",
+        "status": "🧠 Memory saved",
+    }
 
 
 @pytest.mark.asyncio
@@ -187,6 +224,45 @@ async def test_search_notes_uses_semantic_rpc_and_query_embeddings():
     assert list(request.embedding) == [1.0, 0.0]
     assert result.response["notes"][0]["title"] == "Garden"
     stub.SearchNotes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retrieved_memory_is_provided_to_gemini_before_its_reply():
+    client = gemini_client(
+        function_response(("search_notes", {"keyword": "answer style"})),
+        function_response(text="I'll keep my replies concise."),
+    )
+    client.models.embed_content = AsyncMock(
+        return_value=SimpleNamespace(
+            embeddings=[SimpleNamespace(values=[1.0, 0.0])]
+        )
+    )
+    note = SimpleNamespace(
+        id=9,
+        title="Memory: Answer style",
+        content="The user prefers concise answers.",
+        created_at="",
+    )
+    stub = SimpleNamespace(
+        SearchNotesHybrid=AsyncMock(
+            return_value=SimpleNamespace(notes=[note])
+        ),
+    )
+
+    reply = await handle_function_calls(
+        "How should you write your replies?",
+        client,
+        "test-model",
+        [],
+        stub,
+    )
+
+    assert reply == "I'll keep my replies concise."
+    next_request = client.models.generate_content.await_args_list[1].kwargs
+    memory_result = next_request["contents"][-1].parts[0].function_response.response
+    assert memory_result["notes"][0]["content"] == (
+        "The user prefers concise answers."
+    )
 
 
 @pytest.mark.asyncio

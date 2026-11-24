@@ -240,6 +240,11 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             )
         )
 
+    def DeleteNote(self, request, context):
+        return chat_pb2.DeleteNoteResponse(
+            success=db.delete_note(current_user_id(), request.note_id)
+        )
+
     def SearchNotes(self, request, context):
         rows = db.search_notes(current_user_id(), request.keyword)
         return chat_pb2.SearchNotesResponse(

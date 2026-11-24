@@ -112,6 +112,11 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.UpdateNoteRequest.SerializeToString,
                 response_deserializer=chat__pb2.UpdateNoteResponse.FromString,
                 _registered_method=True)
+        self.DeleteNote = channel.unary_unary(
+                '/chat.ChatService/DeleteNote',
+                request_serializer=chat__pb2.DeleteNoteRequest.SerializeToString,
+                response_deserializer=chat__pb2.DeleteNoteResponse.FromString,
+                _registered_method=True)
         self.SearchNotes = channel.unary_unary(
                 '/chat.ChatService/SearchNotes',
                 request_serializer=chat__pb2.SearchNotesRequest.SerializeToString,
@@ -255,6 +260,12 @@ class ChatServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def DeleteNote(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SearchNotes(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -386,6 +397,11 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     servicer.UpdateNote,
                     request_deserializer=chat__pb2.UpdateNoteRequest.FromString,
                     response_serializer=chat__pb2.UpdateNoteResponse.SerializeToString,
+            ),
+            'DeleteNote': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteNote,
+                    request_deserializer=chat__pb2.DeleteNoteRequest.FromString,
+                    response_serializer=chat__pb2.DeleteNoteResponse.SerializeToString,
             ),
             'SearchNotes': grpc.unary_unary_rpc_method_handler(
                     servicer.SearchNotes,
@@ -841,6 +857,33 @@ class ChatService:
             '/chat.ChatService/UpdateNote',
             chat__pb2.UpdateNoteRequest.SerializeToString,
             chat__pb2.UpdateNoteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteNote(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/DeleteNote',
+            chat__pb2.DeleteNoteRequest.SerializeToString,
+            chat__pb2.DeleteNoteResponse.FromString,
             options,
             channel_credentials,
             insecure,

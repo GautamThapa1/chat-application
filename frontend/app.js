@@ -1033,8 +1033,9 @@ function renderThread() {
       ));
     }
   }
-  const toolResults = chat.toolResults.filter(Boolean);
-  if (toolResults.length) threadEl.appendChild(renderToolResults(toolResults));
+  if (chat.toolResults.some(isVisibleMemoryResult)) {
+    threadEl.appendChild(renderToolResults(chat));
+  }
   if (gen) threadEl.appendChild(renderStreamingMessage(gen));
 
   if (chat.notice) {
@@ -1167,21 +1168,65 @@ function renderStreamingMessage(gen) {
   return row;
 }
 
-function renderToolResults(results) {
+function isVisibleMemoryResult(item) {
+  return item?.tool === "save_memory"
+    && item.result?.status === "🧠 Memory saved"
+    && Number.isSafeInteger(item.result.note_id)
+    && item.result.note_id > 0;
+}
+
+function renderToolResults(chat) {
   const section = el("div", "tool-results");
   section.setAttribute("aria-label", "Tool results");
-  for (const item of results) {
-    const name = typeof item.tool === "string" ? item.tool.replace(/_/g, " ") : "tool";
+  for (const [index, item] of chat.toolResults.entries()) {
+    if (!isVisibleMemoryResult(item)) continue;
     const result = el("div", "tool-result");
-    result.appendChild(el("div", "tool-result-title", `Tool result · ${name}`));
     result.appendChild(el(
-      "pre",
-      "tool-result-content",
-      JSON.stringify(item.result, null, 2) ?? String(item.result),
+      "div",
+      "tool-result-title",
+      item.undone ? "Memory removed" : "Remembered this",
     ));
+    result.appendChild(el(
+      "div",
+      "tool-result-content",
+      [item.result.title, item.result.content].filter(Boolean).join("\n"),
+    ));
+    if (!item.undone) {
+      const undo = el(
+        "button",
+        "button secondary",
+        item.undoing ? "Undoing…" : "Undo",
+      );
+      undo.type = "button";
+      undo.disabled = Boolean(item.undoing);
+      undo.addEventListener("click", () => undoMemory(chat, index));
+      result.appendChild(undo);
+    }
     section.appendChild(result);
   }
   return section;
+}
+
+async function undoMemory(chat, index) {
+  const item = chat.toolResults[index];
+  if (!item || item.undone || item.undoing) return;
+
+  item.undoing = true;
+  if (chats.get(activeConversationId) === chat) renderThread();
+  try {
+    const response = await api(`/api/notes/${item.result.note_id}`, "DELETE");
+    if (!response.ok) {
+      throw new Error(errorMessage(response.data));
+    }
+    item.undone = true;
+    if (chat.notice.startsWith("Could not undo memory:")) setNotice(chat, "");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "The request failed.";
+    setNotice(chat, `Could not undo memory: ${detail}`, true);
+  } finally {
+    item.undoing = false;
+    if (chats.get(activeConversationId) === chat) renderThread();
+  }
 }
 
 // Cheap update used for every chunk: only the live bubble is touched.
