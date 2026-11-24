@@ -1,5 +1,6 @@
 """gRPC servicer for ChatService — each RPC delegates to db.py."""
 
+import os
 from concurrent import futures
 
 import grpc
@@ -362,6 +363,35 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
         return chat_pb2.CompleteTaskResponse(success=result["success"])
 
+    def DeleteTask(self, request, context):
+        try:
+            result = db.delete_task_idempotent(
+                current_user_id(),
+                request.task_id,
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.DeleteTaskResponse(success=result["success"])
+
+    def ClearTasks(self, request, context):
+        try:
+            result = db.clear_tasks_idempotent(
+                current_user_id(),
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.ClearTasksResponse(deleted_count=result["deleted_count"])
+
 
 def _conversation_message(row: dict) -> chat_pb2.Conversation:
     return chat_pb2.Conversation(
@@ -373,11 +403,15 @@ def _conversation_message(row: dict) -> chat_pb2.Conversation:
     )
 
 
-def create_server(port: int = 50051) -> grpc.Server:
+def create_server(port: int = 50051, host: str | None = None) -> grpc.Server:
+    # Loopback by default (safe for local runs). In Docker the orchestrator is a
+    # different container, so compose sets GRPC_BIND=0.0.0.0 and the port stays
+    # on the private compose network (it is never published to the host).
+    host = host or os.getenv("GRPC_BIND", "127.0.0.1")
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=10),
         interceptors=[AuthInterceptor()],
     )
     chat_pb2_grpc.add_ChatServiceServicer_to_server(ChatServicer(), server)
-    server.add_insecure_port(f"127.0.0.1:{port}")
+    server.add_insecure_port(f"{host}:{port}")
     return server

@@ -20,7 +20,8 @@ from backend.embeddings import embedding_model, note_content_hash
 from backend.service import note_vector_index
 
 
-DB_PATH = "app.db"
+# DB_PATH lets Docker keep the database on a mounted volume (e.g. /data/app.db).
+DB_PATH = os.getenv("DB_PATH", "app.db")
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
@@ -1502,6 +1503,73 @@ def complete_task_idempotent(
         {"task_id": task_id},
         execute,
     )
+
+def delete_task(user_id: int, task_id: int) -> bool:
+    """Delete one task. Returns False if it does not exist or is not the user's."""
+    conn = get_connection()
+    try:
+        with conn:
+            cur = conn.execute(
+                "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
+            return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_task_idempotent(
+    user_id: int,
+    task_id: int,
+    idempotency_key: str,
+) -> dict:
+    def execute(conn) -> dict:
+        if conn is None:
+            return {"success": delete_task(user_id, task_id)}
+        return {
+            "success": conn.execute(
+                "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            ).rowcount
+            > 0
+        }
+
+    return run_idempotent_request(
+        user_id,
+        idempotency_key,
+        "delete_task",
+        {"task_id": task_id},
+        execute,
+    )
+
+
+def clear_tasks(user_id: int) -> int:
+    """Delete every task owned by the user and return how many were deleted."""
+    conn = get_connection()
+    try:
+        with conn:
+            return conn.execute(
+                "DELETE FROM tasks WHERE user_id = ?", (user_id,)
+            ).rowcount
+    finally:
+        conn.close()
+
+
+def clear_tasks_idempotent(user_id: int, idempotency_key: str) -> dict:
+    # The stored count stops a timeout retry from reporting 0 on the second call.
+    def execute(conn) -> dict:
+        if conn is None:
+            return {"deleted_count": clear_tasks(user_id)}
+        return {
+            "deleted_count": conn.execute(
+                "DELETE FROM tasks WHERE user_id = ?", (user_id,)
+            ).rowcount
+        }
+
+    return run_idempotent_request(
+        user_id, idempotency_key, "clear_tasks", {}, execute,
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Password hashing

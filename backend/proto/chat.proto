@@ -218,6 +218,23 @@ message CompleteTaskResponse {
   bool success = 1;
 }
 
+message DeleteTaskRequest {
+  int64 task_id = 1;
+  string idempotency_key = 2;
+}
+
+message DeleteTaskResponse {
+  bool success = 1;
+}
+
+message ClearTasksRequest {
+  string idempotency_key = 1;
+}
+
+message ClearTasksResponse {
+  int64 deleted_count = 1;
+}
+
 // =========================================================================== #
 // Auth request/response
 // =========================================================================== #
@@ -283,4 +300,6 @@ service ChatService {
   rpc CreateTask(CreateTaskRequest)     returns (CreateTaskResponse);
   rpc ListTasks(ListTasksRequest)       returns (ListTasksResponse);
   rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
+  rpc DeleteTask(DeleteTaskRequest)     returns (DeleteTaskResponse);
+  rpc ClearTasks(ClearTasksRequest)     returns (ClearTasksResponse);
 }
