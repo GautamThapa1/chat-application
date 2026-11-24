@@ -10,6 +10,7 @@ A modern AI-powered chat application built with **Python, FastAPI, and Google Ge
 - **User Authentication** — Secure registration, login, and session management.
 - **Chat History** — Create, manage, and delete conversations.
 - **Notes Management** — Save, search, and retrieve personal notes.
+- **Long-Term Memory** — Automatically retain useful, stable user context in notes, retrieve it when relevant, and undo a newly saved memory.
 - **Task Management** — Create, list, complete, and delete tasks; clearing all tasks requires explicit confirmation.
 - **Gemini Function Calling** — Execute note and task actions; clearing notes or tasks requires explicit confirmation.
 - **gRPC Communication** — Separate application logic from the backend service.
