@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+# A newer push to the same branch/PR cancels the older, now pointless run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default; the docker job asks for more only where needed.
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.4.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (exactly as locked)
+        run: uv sync --frozen
+
+      # If someone edits chat.proto but forgets `make proto`, the committed
+      # generated code is stale. Regenerate and fail if anything changes.
+      - name: Generated gRPC code is up to date
+        run: |
+          make proto
+          git diff --exit-code -- backend/generated
+
+      - name: Run tests
+        env:
+          # Tests use a throwaway database and in-memory Qdrant; no real
+          # secrets are needed (or wanted) in CI.
+          DATABASE_KEY: ci-only-test-key
+        run: uv run pytest -q
+
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tests/frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm test
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]   # do not build/publish an image of failing code
+    permissions:
+      contents: read
+      packages: write            # needed only to push to GHCR
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      # 1) Build the image (layers cached between runs) and load it locally.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: chat-app:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 2) Prove the image really contains everything the app imports.
+      - name: Smoke test the image
+        run: |
+          docker run --rm chat-app:ci python -c \
+            "import backend.orchestrator.main, backend.service.main; print('imports ok')"
+
+      # 3) Prove compose.yaml is valid (dummy secrets; nothing is started).
+      - name: Validate compose file
+        env:
+          GEMINI_API_KEY: dummy
+          DATABASE_KEY: dummy
+        run: docker compose config --quiet
+
+      # 4) Publish only from main or a version tag, never from pull requests.
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        if: github.event_name == 'push'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=ref,event=tag
+
+      - name: Push image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
