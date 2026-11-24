@@ -1,0 +1,18 @@
+# Never bake secrets, local data or caches into an image.
+.env
+.env.*
+!.env.example
+app.db
+*.db
+.venv
+.git
+.github
+**/__pycache__
+**/*.pyc
+.pytest_cache
+node_modules
+tests
+backend/service/test_*.py
+text.txt
+compose.yaml
+Dockerfile
