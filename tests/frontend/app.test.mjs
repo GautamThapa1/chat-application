@@ -71,7 +71,7 @@ async function boot({ username = "Gautam", db } = {}) {
       ],
     },
   };
-  db.deletedNoteIds ??= [];
+  db.deletedMemoryIds ??= [];
 
   const json = (data, status = 200) => Promise.resolve({
     ok: status < 400, status, json: () => Promise.resolve(data),
@@ -100,10 +100,10 @@ async function boot({ username = "Gautam", db } = {}) {
       db.messages[id] = [];
       return json({ conversation: created }, 201);
     }
-    const noteMatch = path.match(/^\/api\/notes\/(\d+)$/);
-    if (noteMatch && method === "DELETE") {
-      if (db.deleteNoteError) return json({ detail: db.deleteNoteError }, 503);
-      db.deletedNoteIds.push(Number(noteMatch[1]));
+    const memoryMatch = path.match(/^\/api\/memories\/(\d+)$/);
+    if (memoryMatch && method === "DELETE") {
+      if (db.deleteMemoryError) return json({ detail: db.deleteMemoryError }, 503);
+      db.deletedMemoryIds.push(Number(memoryMatch[1]));
       return json({ ok: true });
     }
     return json({ detail: "not found" }, 404);
@@ -295,7 +295,7 @@ test("internal search results stay hidden while the assistant reply remains visi
   assert.equal(page.$$(".message.assistant .bubble").at(-1).textContent, "I'll keep my replies concise.");
 });
 
-test("saved memories show an undo action and remove the note", async () => {
+test("saved memories show an undo action and remove the memory", async () => {
   const page = await boot();
   await page.open("Chat A");
   await page.send("I prefer concise answers");
@@ -308,8 +308,8 @@ test("saved memories show an undo action and remove the note", async () => {
     index: 0,
     tool: "save_memory",
     result: {
-      note_id: 42,
-      title: "Memory: Answer style",
+      memory_id: 42,
+      title: "Answer style",
       content: "The user prefers concise answers.",
       status: "🧠 Memory saved",
     },
@@ -320,14 +320,14 @@ test("saved memories show an undo action and remove the note", async () => {
   page.$(".tool-result button").click();
   await tick(20);
 
-  assert.deepEqual(page.db.deletedNoteIds, [42]);
+  assert.deepEqual(page.db.deletedMemoryIds, [42]);
   assert.match(page.threadText(), /Memory removed/);
   assert.equal(page.$(".tool-result button"), null);
 });
 
 test("memory undo errors are shown and can be retried", async () => {
   const page = await boot();
-  page.db.deleteNoteError = "Service temporarily unavailable.";
+  page.db.deleteMemoryError = "Service temporarily unavailable.";
   await page.open("Chat A");
   await page.send("I prefer concise answers");
   const { request_id } = page.socket.sentOfType("message")[0];
@@ -338,8 +338,8 @@ test("memory undo errors are shown and can be retried", async () => {
     index: 0,
     tool: "save_memory",
     result: {
-      note_id: 42,
-      title: "Memory: Answer style",
+      memory_id: 42,
+      title: "Answer style",
       content: "Concise answers.",
       status: "🧠 Memory saved",
     },
@@ -351,11 +351,11 @@ test("memory undo errors are shown and can be retried", async () => {
   assert.match(page.threadText(), /Could not undo memory/);
   assert.ok(page.$(".tool-result button"), "the undo action remains retryable");
 
-  page.db.deleteNoteError = null;
+  page.db.deleteMemoryError = null;
   page.$(".tool-result button").click();
   await tick(20);
 
-  assert.deepEqual(page.db.deletedNoteIds, [42]);
+  assert.deepEqual(page.db.deletedMemoryIds, [42]);
   assert.doesNotMatch(page.threadText(), /Could not undo memory/);
   assert.match(page.threadText(), /Memory removed/);
 });

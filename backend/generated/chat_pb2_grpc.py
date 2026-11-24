@@ -137,6 +137,41 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.ClearNotesRequest.SerializeToString,
                 response_deserializer=chat__pb2.ClearNotesResponse.FromString,
                 _registered_method=True)
+        self.SaveMemory = channel.unary_unary(
+                '/chat.ChatService/SaveMemory',
+                request_serializer=chat__pb2.SaveMemoryRequest.SerializeToString,
+                response_deserializer=chat__pb2.SaveMemoryResponse.FromString,
+                _registered_method=True)
+        self.UpdateMemory = channel.unary_unary(
+                '/chat.ChatService/UpdateMemory',
+                request_serializer=chat__pb2.UpdateMemoryRequest.SerializeToString,
+                response_deserializer=chat__pb2.UpdateMemoryResponse.FromString,
+                _registered_method=True)
+        self.DeleteMemory = channel.unary_unary(
+                '/chat.ChatService/DeleteMemory',
+                request_serializer=chat__pb2.DeleteMemoryRequest.SerializeToString,
+                response_deserializer=chat__pb2.DeleteMemoryResponse.FromString,
+                _registered_method=True)
+        self.ListMemories = channel.unary_unary(
+                '/chat.ChatService/ListMemories',
+                request_serializer=chat__pb2.ListMemoriesRequest.SerializeToString,
+                response_deserializer=chat__pb2.ListMemoriesResponse.FromString,
+                _registered_method=True)
+        self.SearchMemories = channel.unary_unary(
+                '/chat.ChatService/SearchMemories',
+                request_serializer=chat__pb2.SearchMemoriesRequest.SerializeToString,
+                response_deserializer=chat__pb2.SearchMemoriesResponse.FromString,
+                _registered_method=True)
+        self.SearchMemoriesHybrid = channel.unary_unary(
+                '/chat.ChatService/SearchMemoriesHybrid',
+                request_serializer=chat__pb2.SearchMemoriesHybridRequest.SerializeToString,
+                response_deserializer=chat__pb2.SearchMemoriesResponse.FromString,
+                _registered_method=True)
+        self.UpsertMemoryEmbedding = channel.unary_unary(
+                '/chat.ChatService/UpsertMemoryEmbedding',
+                request_serializer=chat__pb2.UpsertMemoryEmbeddingRequest.SerializeToString,
+                response_deserializer=chat__pb2.UpsertMemoryEmbeddingResponse.FromString,
+                _registered_method=True)
         self.CreateTask = channel.unary_unary(
                 '/chat.ChatService/CreateTask',
                 request_serializer=chat__pb2.CreateTaskRequest.SerializeToString,
@@ -290,6 +325,48 @@ class ChatServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SaveMemory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateMemory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteMemory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListMemories(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SearchMemories(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SearchMemoriesHybrid(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpsertMemoryEmbedding(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def CreateTask(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -422,6 +499,41 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     servicer.ClearNotes,
                     request_deserializer=chat__pb2.ClearNotesRequest.FromString,
                     response_serializer=chat__pb2.ClearNotesResponse.SerializeToString,
+            ),
+            'SaveMemory': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveMemory,
+                    request_deserializer=chat__pb2.SaveMemoryRequest.FromString,
+                    response_serializer=chat__pb2.SaveMemoryResponse.SerializeToString,
+            ),
+            'UpdateMemory': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateMemory,
+                    request_deserializer=chat__pb2.UpdateMemoryRequest.FromString,
+                    response_serializer=chat__pb2.UpdateMemoryResponse.SerializeToString,
+            ),
+            'DeleteMemory': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteMemory,
+                    request_deserializer=chat__pb2.DeleteMemoryRequest.FromString,
+                    response_serializer=chat__pb2.DeleteMemoryResponse.SerializeToString,
+            ),
+            'ListMemories': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListMemories,
+                    request_deserializer=chat__pb2.ListMemoriesRequest.FromString,
+                    response_serializer=chat__pb2.ListMemoriesResponse.SerializeToString,
+            ),
+            'SearchMemories': grpc.unary_unary_rpc_method_handler(
+                    servicer.SearchMemories,
+                    request_deserializer=chat__pb2.SearchMemoriesRequest.FromString,
+                    response_serializer=chat__pb2.SearchMemoriesResponse.SerializeToString,
+            ),
+            'SearchMemoriesHybrid': grpc.unary_unary_rpc_method_handler(
+                    servicer.SearchMemoriesHybrid,
+                    request_deserializer=chat__pb2.SearchMemoriesHybridRequest.FromString,
+                    response_serializer=chat__pb2.SearchMemoriesResponse.SerializeToString,
+            ),
+            'UpsertMemoryEmbedding': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpsertMemoryEmbedding,
+                    request_deserializer=chat__pb2.UpsertMemoryEmbeddingRequest.FromString,
+                    response_serializer=chat__pb2.UpsertMemoryEmbeddingResponse.SerializeToString,
             ),
             'CreateTask': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateTask,
@@ -992,6 +1104,195 @@ class ChatService:
             '/chat.ChatService/ClearNotes',
             chat__pb2.ClearNotesRequest.SerializeToString,
             chat__pb2.ClearNotesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveMemory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/SaveMemory',
+            chat__pb2.SaveMemoryRequest.SerializeToString,
+            chat__pb2.SaveMemoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateMemory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/UpdateMemory',
+            chat__pb2.UpdateMemoryRequest.SerializeToString,
+            chat__pb2.UpdateMemoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteMemory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/DeleteMemory',
+            chat__pb2.DeleteMemoryRequest.SerializeToString,
+            chat__pb2.DeleteMemoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListMemories(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/ListMemories',
+            chat__pb2.ListMemoriesRequest.SerializeToString,
+            chat__pb2.ListMemoriesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SearchMemories(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/SearchMemories',
+            chat__pb2.SearchMemoriesRequest.SerializeToString,
+            chat__pb2.SearchMemoriesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SearchMemoriesHybrid(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/SearchMemoriesHybrid',
+            chat__pb2.SearchMemoriesHybridRequest.SerializeToString,
+            chat__pb2.SearchMemoriesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpsertMemoryEmbedding(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/UpsertMemoryEmbedding',
+            chat__pb2.UpsertMemoryEmbeddingRequest.SerializeToString,
+            chat__pb2.UpsertMemoryEmbeddingResponse.FromString,
             options,
             channel_credentials,
             insecure,

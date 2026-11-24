@@ -6,7 +6,7 @@ from concurrent import futures
 import grpc
 
 from backend.generated import chat_pb2, chat_pb2_grpc
-from backend.service import db
+from backend.service import db, memory_store
 from backend.service.auth_interceptor import AuthInterceptor, current_user_id
 
 
@@ -310,6 +310,142 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         return chat_pb2.ClearNotesResponse(
             deleted_count=result["deleted_count"]
         )
+
+    # ---------------------------------------------------------------- #
+    # Memories
+    # ---------------------------------------------------------------- #
+    def SaveMemory(self, request, context):
+        try:
+            result = memory_store.save_memory_idempotent(
+                current_user_id(),
+                request.title,
+                request.content,
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.SaveMemoryResponse(
+            memory=chat_pb2.Memory(
+                id=result["id"],
+                title=result["title"],
+                content=result["content"],
+                created_at=str(result["created_at"] or ""),
+            )
+        )
+
+    def UpdateMemory(self, request, context):
+        try:
+            result = memory_store.update_memory_idempotent(
+                current_user_id(),
+                request.memory_id,
+                request.title,
+                request.content,
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        if not result["found"]:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Memory not found.")
+        return chat_pb2.UpdateMemoryResponse(
+            memory=chat_pb2.Memory(
+                id=result["id"],
+                title=result["title"],
+                content=result["content"],
+                created_at=str(result["created_at"] or ""),
+            )
+        )
+
+    def DeleteMemory(self, request, context):
+        return chat_pb2.DeleteMemoryResponse(
+            success=memory_store.delete_memory(
+                current_user_id(), request.memory_id
+            )
+        )
+
+    def ListMemories(self, request, context):
+        try:
+            rows, total_count = memory_store.list_memories(
+                current_user_id(),
+                limit=request.limit or 20,
+                offset=request.offset,
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.ListMemoriesResponse(
+            memories=[
+                chat_pb2.Memory(
+                    id=row["id"],
+                    title=row["title"],
+                    content=row["content"],
+                    created_at=str(row["created_at"] or ""),
+                )
+                for row in rows
+            ],
+            total_count=total_count,
+        )
+
+    def SearchMemories(self, request, context):
+        try:
+            rows = memory_store.search_memories(
+                current_user_id(), request.keyword
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.SearchMemoriesResponse(
+            memories=[
+                chat_pb2.Memory(
+                    id=row["id"],
+                    title=row["title"],
+                    content=row["content"],
+                    created_at=str(row["created_at"] or ""),
+                )
+                for row in rows
+            ]
+        )
+
+    def SearchMemoriesHybrid(self, request, context):
+        try:
+            rows = memory_store.search_memories_hybrid(
+                current_user_id(),
+                request.keyword,
+                list(request.embedding),
+                request.embedding_model,
+                limit=request.limit or 20,
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.SearchMemoriesResponse(
+            memories=[
+                chat_pb2.Memory(
+                    id=row["id"],
+                    title=row["title"],
+                    content=row["content"],
+                    created_at=str(row["created_at"] or ""),
+                )
+                for row in rows
+            ]
+        )
+
+    def UpsertMemoryEmbedding(self, request, context):
+        try:
+            indexed = memory_store.upsert_memory_embedding(
+                current_user_id(),
+                request.memory_id,
+                list(request.embedding),
+                request.embedding_model,
+                request.content_hash,
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.UpsertMemoryEmbeddingResponse(indexed=indexed)
 
     # ---------------------------------------------------------------- #
     # Tasks  (db.create_task / db.get_tasks / db.complete_task)

@@ -77,8 +77,12 @@ def test_native_tools_declare_all_supported_operations():
         "save_note",
         "save_memory",
         "update_note",
+        "update_memory",
+        "delete_memory",
         "search_notes",
+        "search_memories",
         "list_notes",
+        "list_memories",
         "clear_notes",
         "create_task",
         "list_tasks",
@@ -121,13 +125,13 @@ async def test_save_note_dispatch_validates_and_maps_arguments():
 
 
 @pytest.mark.asyncio
-async def test_save_memory_uses_notes_and_returns_undo_details():
+async def test_save_memory_uses_separate_memory_rpc_and_returns_undo_details():
     stub = SimpleNamespace(
-        SaveNote=AsyncMock(
+        SaveMemory=AsyncMock(
             return_value=SimpleNamespace(
-                note=SimpleNamespace(
+                memory=SimpleNamespace(
                     id=4,
-                    title="Memory: Answer style",
+                    title="Answer style",
                     content="The user prefers concise answers.",
                 )
             )
@@ -143,17 +147,57 @@ async def test_save_memory_uses_notes_and_returns_undo_details():
         confirmation_token="unused",
     )
 
-    request = stub.SaveNote.await_args.args[0]
+    request = stub.SaveMemory.await_args.args[0]
     assert (request.title, request.content) == (
-        "Memory: Answer style",
+        "Answer style",
         "The user prefers concise answers.",
     )
     assert result.response == {
-        "note_id": 4,
-        "title": "Memory: Answer style",
+        "memory_id": 4,
+        "title": "Answer style",
         "content": "The user prefers concise answers.",
         "status": "🧠 Memory saved",
     }
+
+
+@pytest.mark.asyncio
+async def test_update_and_delete_memory_use_memory_rpcs():
+    stub = SimpleNamespace(
+        UpdateMemory=AsyncMock(
+            return_value=SimpleNamespace(
+                memory=SimpleNamespace(id=12, title="Updated")
+            )
+        ),
+        DeleteMemory=AsyncMock(return_value=SimpleNamespace(success=True)),
+    )
+
+    updated = await dispatch_tool_call(
+        "update_memory",
+        {"memory_id": 12, "title": " Updated ", "content": " Revised "},
+        stub,
+        user_message="Edit my memory",
+        history=[],
+        confirmation_token="unused",
+    )
+    deleted = await dispatch_tool_call(
+        "delete_memory",
+        {"memory_id": 12},
+        stub,
+        user_message="Forget that",
+        history=[],
+        confirmation_token="unused",
+    )
+
+    update_request = stub.UpdateMemory.await_args.args[0]
+    delete_request = stub.DeleteMemory.await_args.args[0]
+    assert (
+        update_request.memory_id,
+        update_request.title,
+        update_request.content,
+    ) == (12, "Updated", "Revised")
+    assert delete_request.memory_id == 12
+    assert updated.response["memory_id"] == 12
+    assert deleted.response["success"]
 
 
 @pytest.mark.asyncio
@@ -229,7 +273,7 @@ async def test_search_notes_uses_semantic_rpc_and_query_embeddings():
 @pytest.mark.asyncio
 async def test_retrieved_memory_is_provided_to_gemini_before_its_reply():
     client = gemini_client(
-        function_response(("search_notes", {"keyword": "answer style"})),
+        function_response(("search_memories", {"keyword": "answer style"})),
         function_response(text="I'll keep my replies concise."),
     )
     client.models.embed_content = AsyncMock(
@@ -237,15 +281,15 @@ async def test_retrieved_memory_is_provided_to_gemini_before_its_reply():
             embeddings=[SimpleNamespace(values=[1.0, 0.0])]
         )
     )
-    note = SimpleNamespace(
+    memory = SimpleNamespace(
         id=9,
-        title="Memory: Answer style",
+        title="Answer style",
         content="The user prefers concise answers.",
         created_at="",
     )
     stub = SimpleNamespace(
-        SearchNotesHybrid=AsyncMock(
-            return_value=SimpleNamespace(notes=[note])
+        SearchMemoriesHybrid=AsyncMock(
+            return_value=SimpleNamespace(memories=[memory])
         ),
     )
 
@@ -260,7 +304,7 @@ async def test_retrieved_memory_is_provided_to_gemini_before_its_reply():
     assert reply == "I'll keep my replies concise."
     next_request = client.models.generate_content.await_args_list[1].kwargs
     memory_result = next_request["contents"][-1].parts[0].function_response.response
-    assert memory_result["notes"][0]["content"] == (
+    assert memory_result["memories"][0]["content"] == (
         "The user prefers concise answers."
     )
 
@@ -392,7 +436,10 @@ async def test_task_tools_dispatch_to_the_existing_grpc_methods():
     [
         ("save_note", {"title": "Only title"}),
         ("update_note", {"note_id": True, "title": "x", "content": "y"}),
+        ("update_memory", {"memory_id": True, "title": "x", "content": "y"}),
+        ("delete_memory", {"memory_id": False}),
         ("search_notes", {"keyword": "  "}),
+        ("search_memories", {"keyword": "  "}),
         ("complete_task", {"task_id": True}),
         ("delete_task", {"task_id": True}),
         ("delete_task", {"task_id": 0}),
@@ -406,7 +453,11 @@ async def test_invalid_tool_arguments_are_rejected_without_grpc_calls(
 ):
     stub = SimpleNamespace(
         SaveNote=AsyncMock(),
+        SaveMemory=AsyncMock(),
+        UpdateMemory=AsyncMock(),
+        DeleteMemory=AsyncMock(),
         SearchNotes=AsyncMock(),
+        SearchMemories=AsyncMock(),
         CompleteTask=AsyncMock(),
         DeleteTask=AsyncMock(),
         ClearTasks=AsyncMock(),

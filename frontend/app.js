@@ -1171,8 +1171,8 @@ function renderStreamingMessage(gen) {
 function isVisibleMemoryResult(item) {
   return item?.tool === "save_memory"
     && item.result?.status === "🧠 Memory saved"
-    && Number.isSafeInteger(item.result.note_id)
-    && item.result.note_id > 0;
+    && Number.isSafeInteger(item.result.memory_id)
+    && item.result.memory_id > 0;
 }
 
 function renderToolResults(chat) {
@@ -1214,7 +1214,7 @@ async function undoMemory(chat, index) {
   item.undoing = true;
   if (chats.get(activeConversationId) === chat) renderThread();
   try {
-    const response = await api(`/api/notes/${item.result.note_id}`, "DELETE");
+    const response = await api(`/api/memories/${item.result.memory_id}`, "DELETE");
     if (!response.ok) {
       throw new Error(errorMessage(response.data));
     }

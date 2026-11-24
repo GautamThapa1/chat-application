@@ -124,6 +124,13 @@ message Note {
   string created_at = 4;
 }
 
+message Memory {
+  int64  id         = 1;
+  string title      = 2;
+  string content    = 3;
+  string created_at = 4;
+}
+
 message Task {
   int64  id         = 1;
   string title      = 2;
@@ -196,6 +203,74 @@ message ClearNotesRequest {
 
 message ClearNotesResponse {
   int64 deleted_count = 1;
+}
+
+// =========================================================================== #
+// Memories request/response
+// =========================================================================== #
+message SaveMemoryRequest {
+  string title   = 1;
+  string content = 2;
+  string idempotency_key = 3;
+}
+
+message SaveMemoryResponse {
+  Memory memory = 1;
+}
+
+message UpdateMemoryRequest {
+  int64  memory_id = 1;
+  string title   = 2;
+  string content = 3;
+  string idempotency_key = 4;
+}
+
+message UpdateMemoryResponse {
+  Memory memory = 1;
+}
+
+message DeleteMemoryRequest {
+  int64 memory_id = 1;
+}
+
+message DeleteMemoryResponse {
+  bool success = 1;
+}
+
+message ListMemoriesRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+}
+
+message ListMemoriesResponse {
+  repeated Memory memories = 1;
+  int32 total_count = 2;
+}
+
+message SearchMemoriesRequest {
+  string keyword = 1;
+}
+
+message SearchMemoriesHybridRequest {
+  string keyword           = 1;
+  repeated float embedding = 2;
+  string embedding_model   = 3;
+  int32  limit             = 4;
+}
+
+message SearchMemoriesResponse {
+  repeated Memory memories = 1;
+}
+
+message UpsertMemoryEmbeddingRequest {
+  int64  memory_id         = 1;
+  repeated float embedding = 2;
+  string embedding_model   = 3;
+  string content_hash      = 4;
+}
+
+message UpsertMemoryEmbeddingResponse {
+  bool indexed = 1;
 }
 
 // =========================================================================== #
@@ -306,6 +381,13 @@ service ChatService {
   rpc SearchNotesHybrid(SearchNotesHybridRequest) returns (SearchNotesResponse);
   rpc UpsertNoteEmbedding(UpsertNoteEmbeddingRequest) returns (UpsertNoteEmbeddingResponse);
   rpc ClearNotes(ClearNotesRequest)     returns (ClearNotesResponse);
+  rpc SaveMemory(SaveMemoryRequest) returns (SaveMemoryResponse);
+  rpc UpdateMemory(UpdateMemoryRequest) returns (UpdateMemoryResponse);
+  rpc DeleteMemory(DeleteMemoryRequest) returns (DeleteMemoryResponse);
+  rpc ListMemories(ListMemoriesRequest) returns (ListMemoriesResponse);
+  rpc SearchMemories(SearchMemoriesRequest) returns (SearchMemoriesResponse);
+  rpc SearchMemoriesHybrid(SearchMemoriesHybridRequest) returns (SearchMemoriesResponse);
+  rpc UpsertMemoryEmbedding(UpsertMemoryEmbeddingRequest) returns (UpsertMemoryEmbeddingResponse);
   rpc CreateTask(CreateTaskRequest)     returns (CreateTaskResponse);
   rpc ListTasks(ListTasksRequest)       returns (ListTasksResponse);
   rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);

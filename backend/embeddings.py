@@ -26,6 +26,16 @@ def note_content_hash(title: str, content: str) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def validate_embedding_vector(values: list[float]) -> list[float]:
+    try:
+        vector = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Embedding must contain numeric values.") from exc
+    if not vector or any(not math.isfinite(value) for value in vector):
+        raise ValueError("Embedding must contain finite values.")
+    return vector
+
+
 def _embedding_values(response: Any) -> list[float]:
     embeddings = response.embeddings
     if not embeddings or embeddings[0].values is None:

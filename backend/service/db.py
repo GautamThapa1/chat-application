@@ -3,7 +3,6 @@
 import hashlib
 import hmac
 import json
-import math
 import os
 import re
 import secrets
@@ -16,7 +15,11 @@ from pathlib import Path
 import sqlcipher3
 from dotenv import load_dotenv
 
-from backend.embeddings import embedding_model, note_content_hash
+from backend.embeddings import (
+    embedding_model,
+    note_content_hash,
+    validate_embedding_vector,
+)
 from backend.service import note_vector_index
 
 
@@ -404,6 +407,9 @@ def init_db():
                 "CREATE INDEX IF NOT EXISTS idx_tasks_user_status "
                 "ON tasks(user_id, completed, id)"
             )
+            from backend.service.memory_store import init_memory_storage
+
+            init_memory_storage(conn)
             _reconcile_note_embedding_jobs(conn)
     finally:
         conn.close()
@@ -1158,13 +1164,7 @@ def get_legacy_note_embedding(note_id: int) -> dict | None:
 
 
 def _float_vector(values: list[float]) -> list[float]:
-    try:
-        vector = [float(value) for value in values]
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Embedding must contain numeric values.") from exc
-    if not vector or any(not math.isfinite(value) for value in vector):
-        raise ValueError("Embedding must contain finite values.")
-    return vector
+    return validate_embedding_vector(values)
 
 
 def upsert_note_embedding(
@@ -1197,7 +1197,7 @@ def upsert_note_embedding(
             # Qdrant is updated first, while SQL remains the stale-result and
             # retry source of truth. The index reference is committed afterward.
             collection = note_vector_index.upsert(
-                note_id=note_id,
+                record_id=note_id,
                 user_id=user_id,
                 vector=vector,
                 model=model,

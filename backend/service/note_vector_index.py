@@ -33,10 +33,21 @@ def _client_for_config() -> QdrantClient:
         return _client
 
 
-def collection_name(model: str, dimensions: int) -> str:
+def collection_name(model: str, dimensions: int, entity: str = "notes") -> str:
     # Embedding dimensions and models define incompatible vector spaces, so
-    # keep each combination in a separate collection.
-    prefix = os.getenv("QDRANT_COLLECTION_PREFIX", "note_embeddings")
+    # keep each combination and entity in a separate collection.
+    notes_prefix = os.getenv("QDRANT_COLLECTION_PREFIX", "note_embeddings")
+    if entity == "notes":
+        prefix = notes_prefix
+    elif entity == "memories":
+        prefix = os.getenv(
+            "QDRANT_MEMORY_COLLECTION_PREFIX",
+            f"{notes_prefix}_memories",
+        )
+        if prefix == notes_prefix:
+            raise ValueError("Notes and memories require separate Qdrant collections.")
+    else:
+        raise ValueError(f"Unknown embedding entity: {entity!r}.")
     suffix = hashlib.sha256(f"{model}:{dimensions}".encode()).hexdigest()[:12]
     return f"{prefix}_{suffix}"
 
@@ -57,21 +68,22 @@ def _ensure_collection(name: str, dimensions: int) -> QdrantClient:
 
 def upsert(
     *,
-    note_id: int,
+    record_id: int,
     user_id: int,
     vector: list[float],
     model: str,
     content_hash: str,
+    entity: str = "notes",
 ) -> str:
     # Qdrant owns the vector and cosine index. SQLite stores only a reference
     # to the collection and the content hash used for stale-result checks.
-    name = collection_name(model, len(vector))
+    name = collection_name(model, len(vector), entity)
     client = _ensure_collection(name, len(vector))
     client.upsert(
         collection_name=name,
         points=[
             models.PointStruct(
-                id=note_id,
+                id=record_id,
                 vector=vector,
                 payload={
                     "user_id": user_id,
@@ -91,10 +103,11 @@ def search(
     vector: list[float],
     model: str,
     limit: int,
+    entity: str = "notes",
 ) -> list[tuple[int, float]]:
     # Apply the owner filter inside Qdrant so a user never retrieves another
     # user's vector results.
-    name = collection_name(model, len(vector))
+    name = collection_name(model, len(vector), entity)
     client = _client_for_config()
     if not client.collection_exists(name):
         return []
@@ -119,13 +132,13 @@ def search(
     return [(int(point.id), point.score) for point in results.points]
 
 
-def delete_points(collection: str, note_ids: list[int]) -> None:
-    if not note_ids:
+def delete_points(collection: str, point_ids: list[int]) -> None:
+    if not point_ids:
         return
     client = _client_for_config()
     if client.collection_exists(collection):
         client.delete(
             collection_name=collection,
-            points_selector=models.PointIdsList(points=note_ids),
+            points_selector=models.PointIdsList(points=point_ids),
             wait=True,
         )

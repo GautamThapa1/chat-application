@@ -8,7 +8,7 @@ import pytest
 
 from backend.embeddings import embedding_model, note_content_hash
 import backend.service.db as db
-from backend.service import embedding_worker
+from backend.service import embedding_worker, memory_store
 
 
 @pytest.fixture
@@ -153,6 +153,101 @@ def test_notes_are_isolated_by_owner(owners_db):
     assert note_id > 0
     assert db.search_notes(user_a, "milk")[0]["title"] == "Grocery"
     assert db.search_notes(user_b, "milk") == []
+
+
+def test_memories_use_separate_owner_scoped_storage(owners_db):
+    user_a, user_b = owners_db
+    note_id = db.save_note(user_a, "Preference", "Prefers concise answers")
+    memory_id = memory_store.save_memory(
+        user_a, "Answer style", "Prefers concise answers"
+    )
+
+    note_rows = db.search_notes(user_a, "concise")
+    assert [(row["id"], row["title"]) for row in note_rows] == [
+        (note_id, "Preference")
+    ]
+    assert [row["id"] for row in memory_store.search_memories(user_a, "concise")] == [
+        memory_id
+    ]
+    assert memory_store.search_memories(user_b, "concise") == []
+    memories, total_count = memory_store.list_memories(user_a)
+    assert total_count == 1
+    assert [row["id"] for row in memories] == [memory_id]
+
+
+def test_memory_embeddings_are_separate_and_deleted_with_the_memory(
+    owners_db, monkeypatch,
+):
+    user_a, user_b = owners_db
+    memory_id = memory_store.save_memory(
+        user_a, "Project", "A stable project context"
+    )
+    content_hash = note_content_hash("Project", "A stable project context")
+    assert memory_store.upsert_memory_embedding(
+        user_a, memory_id, [1.0, 0.0], "test-model", content_hash
+    )
+
+    deleted_points = []
+    delete_points = db.note_vector_index.delete_points
+
+    def record_delete(collection, ids):
+        deleted_points.append((collection, list(ids)))
+        return delete_points(collection, ids)
+
+    monkeypatch.setattr(db.note_vector_index, "delete_points", record_delete)
+    assert memory_store.update_memory(
+        user_a, memory_id, "Project", "An updated project context"
+    )
+    assert not memory_store.upsert_memory_embedding(
+        user_a, memory_id, [1.0, 0.0], "test-model", content_hash
+    )
+    updated_hash = note_content_hash("Project", "An updated project context")
+    assert memory_store.upsert_memory_embedding(
+        user_a, memory_id, [0.0, 1.0], "test-model", updated_hash
+    )
+    assert not memory_store.delete_memory(user_b, memory_id)
+    assert memory_store.delete_memory(user_a, memory_id)
+    assert len(deleted_points) == 2
+    assert all(point_ids == [memory_id] for _, point_ids in deleted_points)
+    assert not memory_store.upsert_memory_embedding(
+        user_a, memory_id, [0.0, 1.0], "test-model", updated_hash
+    )
+    assert memory_store.search_memories(user_a, "stable project") == []
+
+    assert db.note_vector_index.collection_name(
+        "test-model", 2, "notes"
+    ) != db.note_vector_index.collection_name("test-model", 2, "memories")
+
+
+def test_legacy_memory_notes_move_to_memory_storage(owners_db, monkeypatch):
+    user_id, _ = owners_db
+    legacy_id = db.save_note(
+        user_id, "Memory: Answer style", "Prefers concise answers"
+    )
+    content_hash = note_content_hash(
+        "Memory: Answer style", "Prefers concise answers"
+    )
+    assert db.upsert_note_embedding(
+        user_id, legacy_id, [1.0, 0.0], "test-model", content_hash
+    )
+
+    deleted_points = []
+    delete_points = db.note_vector_index.delete_points
+
+    def record_delete(collection, ids):
+        deleted_points.append((collection, list(ids)))
+        return delete_points(collection, ids)
+
+    monkeypatch.setattr(db.note_vector_index, "delete_points", record_delete)
+    db.init_db()
+
+    assert db.search_notes(user_id, "concise") == []
+    migrated, count = memory_store.list_memories(user_id)
+    assert count == 1
+    assert migrated[0]["title"] == "Answer style"
+    assert migrated[0]["content"] == "Prefers concise answers"
+    assert len(deleted_points) == 1
+    assert deleted_points[0][1] == [legacy_id]
 
 
 def test_mutation_idempotency_retries_and_payload_conflicts(owners_db):

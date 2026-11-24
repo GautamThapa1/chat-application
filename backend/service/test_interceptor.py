@@ -296,6 +296,115 @@ def test_note_embedding_rpcs_enforce_owner_and_support_semantic_search(stub):
     ).notes
 
 
+def test_memory_rpcs_are_separate_owner_scoped_and_editable(stub):
+    stub.Register(
+        chat_pb2.RegisterRequest(username="alice", password="correct-horse")
+    )
+    stub.Register(
+        chat_pb2.RegisterRequest(username="bob", password="another-horse")
+    )
+    token_a = stub.Login(
+        chat_pb2.LoginRequest(username="alice", password="correct-horse")
+    ).session_token
+    token_b = stub.Login(
+        chat_pb2.LoginRequest(username="bob", password="another-horse")
+    ).session_token
+    metadata_a = ((SESSION_METADATA_KEY, token_a),)
+    metadata_b = ((SESSION_METADATA_KEY, token_b),)
+    memory = stub.SaveMemory(
+        chat_pb2.SaveMemoryRequest(
+            title="Answer style",
+            content="Prefers concise answers",
+        ),
+        metadata=metadata_a,
+    ).memory
+    note = stub.SaveNote(
+        chat_pb2.SaveNoteRequest(
+            title="Answer style",
+            content="Meeting notes about concise writing",
+        ),
+        metadata=metadata_a,
+    ).note
+
+    assert stub.ListMemories(
+        chat_pb2.ListMemoriesRequest(), metadata=metadata_a
+    ).memories[0].id == memory.id
+    assert stub.SearchMemories(
+        chat_pb2.SearchMemoriesRequest(keyword="concise"),
+        metadata=metadata_a,
+    ).memories[0].id == memory.id
+    assert stub.SearchNotes(
+        chat_pb2.SearchNotesRequest(keyword="concise"),
+        metadata=metadata_a,
+    ).notes[0].id == note.id
+    assert not stub.SearchMemories(
+        chat_pb2.SearchMemoriesRequest(keyword="meeting"),
+        metadata=metadata_a,
+    ).memories
+
+    embedding = [1.0, 0.0]
+    request = chat_pb2.UpsertMemoryEmbeddingRequest(
+        memory_id=memory.id,
+        embedding=embedding,
+        embedding_model="test-model",
+        content_hash=note_content_hash("Answer style", "Prefers concise answers"),
+    )
+    assert not stub.UpsertMemoryEmbedding(
+        request, metadata=metadata_b
+    ).indexed
+    assert stub.UpsertMemoryEmbedding(request, metadata=metadata_a).indexed
+    assert stub.SearchMemoriesHybrid(
+        chat_pb2.SearchMemoriesHybridRequest(
+            embedding=embedding,
+            embedding_model="test-model",
+        ),
+        metadata=metadata_a,
+    ).memories[0].id == memory.id
+
+    with pytest.raises(grpc.RpcError) as update_error:
+        stub.UpdateMemory(
+            chat_pb2.UpdateMemoryRequest(
+                memory_id=memory.id,
+                title="Stolen",
+                content="Private",
+            ),
+            metadata=metadata_b,
+        )
+    assert update_error.value.code() == grpc.StatusCode.NOT_FOUND
+    updated = stub.UpdateMemory(
+        chat_pb2.UpdateMemoryRequest(
+            memory_id=memory.id,
+            title="Answer style",
+            content="Now prefers detailed answers",
+        ),
+        metadata=metadata_a,
+    ).memory
+    assert updated.content == "Now prefers detailed answers"
+    assert stub.UpsertMemoryEmbedding(
+        chat_pb2.UpsertMemoryEmbeddingRequest(
+            memory_id=memory.id,
+            embedding=embedding,
+            embedding_model="test-model",
+            content_hash=note_content_hash(
+                "Answer style", "Now prefers detailed answers"
+            ),
+        ),
+        metadata=metadata_a,
+    ).indexed
+    assert not stub.DeleteMemory(
+        chat_pb2.DeleteMemoryRequest(memory_id=memory.id),
+        metadata=metadata_b,
+    ).success
+    assert stub.DeleteMemory(
+        chat_pb2.DeleteMemoryRequest(memory_id=memory.id),
+        metadata=metadata_a,
+    ).success
+    assert not stub.SearchMemories(
+        chat_pb2.SearchMemoriesRequest(keyword="concise"),
+        metadata=metadata_a,
+    ).memories
+
+
 def test_conversation_endpoints_require_a_valid_session(stub):
     with pytest.raises(grpc.RpcError) as missing:
         stub.ListConversations(chat_pb2.ListConversationsRequest())
@@ -316,6 +425,10 @@ def test_conversation_endpoints_require_a_valid_session(stub):
     with pytest.raises(grpc.RpcError) as delete_note:
         stub.DeleteNote(chat_pb2.DeleteNoteRequest(note_id=1))
     assert delete_note.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+    with pytest.raises(grpc.RpcError) as list_memories:
+        stub.ListMemories(chat_pb2.ListMemoriesRequest())
+    assert list_memories.value.code() == grpc.StatusCode.UNAUTHENTICATED
 
     with pytest.raises(grpc.RpcError) as invalid:
         stub.GetConversation(
