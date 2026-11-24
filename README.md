@@ -8,7 +8,7 @@ A modern AI-powered chat application built with **Python, FastAPI, and Google Ge
 
 - **AI Conversations** — Stream real-time responses using Google Gemini.
 - **User Authentication** — Secure registration, login, and session management.
-- **Chat History** — Create, manage, and delete conversations.
+- **Chat History** — Create, manage, delete, and semantically search conversations.
 - **Notes Management** — Save, search, and retrieve personal notes.
 - **Long-Term Memory** — Automatically retain useful, stable user context separately from notes, retrieve it when relevant, and undo a newly saved memory.
 - **Task Management** — Create, list, complete, and delete tasks; clearing all tasks requires explicit confirmation.
@@ -81,7 +81,13 @@ Existing SQLite vectors are moved to Qdrant on the next indexing pass without
 re-embedding when their model and content hash are still current.
 
 Memories are stored in a separate encrypted SQLite table and indexed in a
-distinct Qdrant collection by the shared background worker. The
+distinct Qdrant collection by the shared background worker. Conversation history
+is indexed in its own Qdrant collection: each user prompt and its assistant
+reply form a chunk, and long turns are split at natural text boundaries. The
+worker backfills existing conversations, incrementally embeds new turns, and
+reindexes edited branches. `/api/conversations/search` embeds each query with
+the same Gemini model and returns owner-scoped, semantically ranked chunk
+previews, with keyword-only fallback when query embedding is unavailable. The
 `/api/memories` list, search, create, update, and delete endpoints provide a
 separate management API for a future Settings page. Legacy notes titled
 `Memory: ...` are moved into memory storage at startup. Search combines
@@ -150,6 +156,7 @@ Open [http://localhost:8000](http://localhost:8000).
 | `GRPC_BIND` | service | Interface the gRPC server listens on (default `127.0.0.1`) |
 | `DB_PATH` | service | Database file path (default `app.db`) |
 | `QDRANT_URL` | service | Qdrant address (default `http://localhost:6333`) |
+| `QDRANT_CONVERSATION_COLLECTION_PREFIX` | service | Optional conversation-vector collection prefix (default `note_embeddings_conversations`, derived from `QDRANT_COLLECTION_PREFIX`) |
 
 ## 🔁 Continuous Integration
 
