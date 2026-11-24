@@ -1,4 +1,4 @@
-"""Background generation and reconciliation of note and memory embeddings."""
+"""Background generation and reconciliation of note, memory, and chat embeddings."""
 
 import logging
 import os
@@ -7,6 +7,7 @@ import uuid
 
 from google import genai
 
+from backend.conversation_chunks import chunk_conversation
 from backend.embeddings import (
     DOCUMENT_TASK_TYPE,
     embedding_model,
@@ -33,7 +34,7 @@ class EmbeddingWorker:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             logger.warning(
-                "Embedding worker is disabled; set GEMINI_API_KEY to index notes and memories."
+                "Embedding worker is disabled; set GEMINI_API_KEY to index notes, memories, and conversations."
             )
             return
         self._thread = threading.Thread(
@@ -80,7 +81,11 @@ class EmbeddingWorker:
                     memory_store.record_memory_embedding_failure,
                 ),
             ]
-            if not any(jobs for _, jobs, _, _, _ in queues):
+            conversation_jobs = db.get_pending_conversation_embeddings(
+                self._batch_size,
+                lease_owner=self._lease_owner,
+            )
+            if not any(jobs for _, jobs, _, _, _ in queues) and not conversation_jobs:
                 self._stop_event.wait(self._poll_interval)
                 continue
             for entity, jobs, get_legacy, upsert, record_failure in queues:
@@ -125,6 +130,56 @@ class EmbeddingWorker:
                             job["id"],
                             exc_info=True,
                         )
+
+            for job in conversation_jobs:
+                if self._stop_event.is_set():
+                    break
+                try:
+                    model = embedding_model()
+                    chunks = chunk_conversation(job["conversation_id"], job["messages"])
+                    existing = {
+                        item["chunk_id"]: item
+                        for item in db.get_conversation_embedding_index(
+                            job["user_id"], job["conversation_id"]
+                        )
+                    }
+                    vectors = {}
+                    for chunk in chunks:
+                        indexed = existing.get(chunk["chunk_id"])
+                        if (
+                            indexed is not None
+                            and indexed["content_hash"] == chunk["content_hash"]
+                            and indexed["model"] == model
+                        ):
+                            continue
+                        vectors[chunk["chunk_id"]] = embed_text(
+                            client,
+                            chunk["content"],
+                            task_type=DOCUMENT_TASK_TYPE,
+                            model=model,
+                        )
+                    indexed = db.upsert_conversation_embeddings(
+                        job["user_id"],
+                        job["conversation_id"],
+                        chunks,
+                        vectors,
+                        model,
+                        job["snapshot_hash"],
+                    )
+                    if not indexed:
+                        logger.info(
+                            "Skipped stale conversation embedding result for %s.",
+                            job["conversation_id"],
+                        )
+                except Exception as exc:
+                    db.record_conversation_embedding_failure(
+                        job["conversation_id"], str(exc)
+                    )
+                    logger.warning(
+                        "Could not index conversation %s; it will be retried.",
+                        job["conversation_id"],
+                        exc_info=True,
+                    )
 
 
 NoteEmbeddingWorker = EmbeddingWorker

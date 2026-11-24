@@ -14,7 +14,7 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
-  # gRPC ChatService + SQLite database + note-embedding worker.
+  # gRPC ChatService + SQLite database + shared embedding worker.
   service:
     build: .
     image: chat-app:local
@@ -24,6 +24,8 @@ services:
       DATABASE_KEY: ${DATABASE_KEY:?Set DATABASE_KEY in .env}
       GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
       GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      QDRANT_COLLECTION_PREFIX: ${QDRANT_COLLECTION_PREFIX:-note_embeddings}
+      QDRANT_CONVERSATION_COLLECTION_PREFIX: ${QDRANT_CONVERSATION_COLLECTION_PREFIX:-}
       QDRANT_URL: http://qdrant:6333
       GRPC_BIND: 0.0.0.0   # reachable from the "app" container only (no ports: published)
       DB_PATH: /data/app.db

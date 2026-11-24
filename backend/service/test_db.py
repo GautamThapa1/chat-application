@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from backend.embeddings import embedding_model, note_content_hash
+from backend.conversation_chunks import chunk_conversation, conversation_snapshot_hash
 import backend.service.db as db
 from backend.service import embedding_worker, memory_store
 
@@ -863,3 +864,124 @@ def test_list_conversations_rejects_negative_offset(owners_db):
 
     with pytest.raises(ValueError):
         db.list_conversations(user_a, limit=20, offset=-1)
+
+
+def _index_conversation(user_id, conversation_id):
+    messages = db.get_conversation_messages(user_id, conversation_id)
+    chunks = chunk_conversation(conversation_id, messages)
+    vectors = {chunk["chunk_id"]: [1.0, 0.0] for chunk in chunks}
+    indexed = db.upsert_conversation_embeddings(
+        user_id,
+        conversation_id,
+        chunks,
+        vectors,
+        "gemini-embedding-001",
+        conversation_snapshot_hash(messages),
+    )
+    assert indexed
+    return chunks
+
+
+def test_conversation_semantic_search_is_owner_scoped_and_uses_its_own_collection(owners_db):
+    user_a, user_b = owners_db
+    conversation_a = db.create_conversation(user_a, "Hiking plans")
+    conversation_b = db.create_conversation(user_b, "Private hiking")
+    db.save_conversation(
+        user_a, conversation_a["id"], "How should I prepare for a long trek?",
+        "Build endurance gradually and pack layered clothing.",
+    )
+    db.save_conversation(
+        user_b, conversation_b["id"], "My private route",
+        "This belongs to another account.",
+    )
+    chunks_a = _index_conversation(user_a, conversation_a["id"])
+    _index_conversation(user_b, conversation_b["id"])
+
+    results = db.search_conversations_hybrid(
+        user_a, "hiking", [1.0, 0.0], "gemini-embedding-001"
+    )
+
+    assert [row["conversation_id"] for row in results] == [conversation_a["id"]]
+    assert "long trek" in results[0]["excerpt"]
+    assert db.search_conversations_hybrid(
+        user_b, "", [1.0, 0.0], "gemini-embedding-001"
+    )[0]["conversation_id"] == conversation_b["id"]
+    assert db.search_conversations_keyword(user_a, "another account") == []
+    assert db.search_conversations_keyword(user_b, "another account")[0]["conversation_id"] == conversation_b["id"]
+    assert db.note_vector_index.collection_name(
+        "gemini-embedding-001", 2, "conversations"
+    ) != db.note_vector_index.collection_name("gemini-embedding-001", 2, "notes")
+    assert len(chunks_a) == 1
+
+
+def test_hybrid_conversation_search_includes_unindexed_keyword_matches(owners_db):
+    user_a, _ = owners_db
+    conversation = db.create_conversation(user_a, "Recent deployment notes")
+    db.save_conversation(
+        user_a,
+        conversation["id"],
+        "How do I deploy the worker?",
+        "Use the service container and configure Qdrant.",
+    )
+
+    # Search is available immediately, before the asynchronous index worker
+    # has embedded this new conversation.
+    results = db.search_conversations_hybrid(
+        user_a, "deploy the worker", [1.0, 0.0], "gemini-embedding-001"
+    )
+
+    assert [row["conversation_id"] for row in results] == [conversation["id"]]
+    assert results[0]["score"] == 0.2
+    assert "deploy the worker" in results[0]["excerpt"]
+
+
+def test_conversation_edit_invalidates_old_chunks_and_delete_removes_index(owners_db):
+    user_a, _ = owners_db
+    conversation = db.create_conversation(user_a, "Edit indexed chat")
+    db.save_conversation(
+        user_a, conversation["id"], "Original topic", "Original answer"
+    )
+    _index_conversation(user_a, conversation["id"])
+
+    user_message = db.get_conversation_messages(user_a, conversation["id"])[0]
+    assert db.edit_conversation_message(
+        user_a, conversation["id"], user_message["id"], "Revised topic"
+    )[0]
+    assert db.search_conversations_hybrid(
+        user_a, "original", [1.0, 0.0], "gemini-embedding-001"
+    ) == []
+    assert db.get_conversation_embedding_index(user_a, conversation["id"]) == []
+
+    # Reindex the edited snapshot, then verify that deleting the conversation
+    # removes both its SQL index rows and Qdrant points.
+    db.save_conversation(
+        user_a, conversation["id"], "Revised topic", "Revised answer"
+    )
+    _index_conversation(user_a, conversation["id"])
+    assert db.delete_conversation(user_a, conversation["id"])
+    assert db.get_conversation_embedding_index(user_a, conversation["id"]) == []
+    assert db.search_conversations_hybrid(
+        user_a, "revised", [1.0, 0.0], "gemini-embedding-001"
+    ) == []
+
+
+def test_stale_conversation_embedding_snapshot_is_rejected(owners_db):
+    user_a, _ = owners_db
+    conversation = db.create_conversation(user_a, "Stale snapshot")
+    db.save_conversation(user_a, conversation["id"], "First prompt", "First reply")
+    old_messages = db.get_conversation_messages(user_a, conversation["id"])
+    old_chunks = chunk_conversation(conversation["id"], old_messages)
+    old_snapshot = conversation_snapshot_hash(old_messages)
+
+    db.save_conversation(user_a, conversation["id"], "Second prompt", "Second reply")
+    result = db.upsert_conversation_embeddings(
+        user_a,
+        conversation["id"],
+        old_chunks,
+        {chunk["chunk_id"]: [1.0, 0.0] for chunk in old_chunks},
+        "gemini-embedding-001",
+        old_snapshot,
+    )
+
+    assert result is False
+    assert db.get_conversation_embedding_index(user_a, conversation["id"]) == []

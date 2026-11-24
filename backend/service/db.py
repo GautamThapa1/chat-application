@@ -20,6 +20,10 @@ from backend.embeddings import (
     note_content_hash,
     validate_embedding_vector,
 )
+from backend.conversation_chunks import (
+    chunk_conversation,
+    conversation_snapshot_hash,
+)
 from backend.service import note_vector_index
 
 
@@ -190,6 +194,48 @@ def _queue_note_embedding(
         )
 
 
+def _queue_conversation_embedding(conn, user_id: int, conversation_id: int) -> None:
+    conn.execute(
+        """INSERT INTO conversation_embedding_jobs (conversation_id, user_id)
+           VALUES (?, ?)
+           ON CONFLICT(conversation_id) DO UPDATE SET
+               user_id = excluded.user_id,
+               attempts = 0,
+               next_attempt_at = 0,
+               last_error = NULL,
+               lease_owner = NULL,
+               lease_until = 0""",
+        (conversation_id, user_id),
+    )
+
+
+def _delete_conversation_embedding_index(conn, conversation_id: int) -> None:
+    rows = conn.execute(
+        """SELECT chunk_id, collection FROM conversation_embedding_index
+             WHERE conversation_id = ?""",
+        (conversation_id,),
+    ).fetchall()
+    by_collection: dict[str, list[str]] = {}
+    for row in rows:
+        by_collection.setdefault(row["collection"], []).append(row["chunk_id"])
+    for collection, chunk_ids in by_collection.items():
+        note_vector_index.delete_points(collection, chunk_ids)
+    conn.execute(
+        "DELETE FROM conversation_embedding_index WHERE conversation_id = ?",
+        (conversation_id,),
+    )
+
+
+def _reconcile_conversation_embedding_jobs(conn) -> None:
+    # Existing chats are backfilled on startup. The worker skips unchanged
+    # chunks, so this also safely repairs interrupted or partially-built indexes.
+    rows = conn.execute(
+        "SELECT conversation_id, user_id FROM conversations"
+    ).fetchall()
+    for row in rows:
+        _queue_conversation_embedding(conn, row["user_id"], row["conversation_id"])
+
+
 def _reconcile_note_embedding_jobs(conn) -> None:
     # Startup reconciliation queues notes whose model or content changed.
     # This also covers notes that existed before the embedding job table.
@@ -313,6 +359,38 @@ def init_db():
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_embedding_index (
+                    chunk_id          TEXT PRIMARY KEY,
+                    conversation_id   INTEGER NOT NULL,
+                    user_id           INTEGER NOT NULL,
+                    message_start_id  INTEGER NOT NULL,
+                    message_end_id    INTEGER NOT NULL,
+                    chunk_index       INTEGER NOT NULL,
+                    chunk_content     TEXT NOT NULL,
+                    model             TEXT NOT NULL,
+                    dimensions        INTEGER NOT NULL CHECK (dimensions > 0),
+                    collection        TEXT NOT NULL,
+                    content_hash      TEXT NOT NULL,
+                    updated_at        INTEGER NOT NULL,
+                    FOREIGN KEY (conversation_id, user_id)
+                        REFERENCES conversations(conversation_id, user_id)
+                        ON DELETE CASCADE,
+                    UNIQUE (conversation_id, chunk_index)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_embedding_jobs (
+                    conversation_id INTEGER PRIMARY KEY
+                        REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+                    user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    attempts         INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at  INTEGER NOT NULL DEFAULT 0,
+                    last_error       TEXT,
+                    lease_owner      TEXT,
+                    lease_until      INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS notes (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -392,6 +470,14 @@ def init_db():
                 "ON messages(user_id, conversation_id, message_id)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversation_embedding_user "
+                "ON conversation_embedding_index(user_id, conversation_id, chunk_index)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversation_embedding_jobs_due "
+                "ON conversation_embedding_jobs(next_attempt_at, conversation_id)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_notes_user "
                 "ON notes(user_id, id)"
             )
@@ -411,6 +497,7 @@ def init_db():
 
             init_memory_storage(conn)
             _reconcile_note_embedding_jobs(conn)
+            _reconcile_conversation_embedding_jobs(conn)
     finally:
         conn.close()
 
@@ -551,6 +638,8 @@ def edit_conversation_message(
                   WHERE conversation_id = ? AND user_id = ?""",
                 (conversation_id, user_id),
             )
+            _delete_conversation_embedding_index(conn, conversation_id)
+            _queue_conversation_embedding(conn, user_id, conversation_id)
             return True, content
     finally:
         conn.close()
@@ -655,6 +744,8 @@ def replace_assistant_response(
                   WHERE conversation_id = ? AND user_id = ?""",
                 (conversation_id, user_id),
             )
+            _delete_conversation_embedding_index(conn, conversation_id)
+            _queue_conversation_embedding(conn, user_id, conversation_id)
             return True
     finally:
         conn.close()
@@ -664,6 +755,13 @@ def delete_conversation(user_id: int, conversation_id: int) -> bool:
     conn = get_connection()
     try:
         with conn:
+            owned = conn.execute(
+                "SELECT 1 FROM conversations WHERE conversation_id = ? AND user_id = ?",
+                (conversation_id, user_id),
+            ).fetchone()
+            if owned is None:
+                return False
+            _delete_conversation_embedding_index(conn, conversation_id)
             deleted = conn.execute(
                 "DELETE FROM conversations WHERE conversation_id = ? AND user_id = ?",
                 (conversation_id, user_id),
@@ -763,6 +861,7 @@ def save_conversation(
                     WHERE conversation_id = ? AND user_id = ?""",
                 (title, conversation_id, user_id),
             )
+            _queue_conversation_embedding(conn, user_id, conversation_id)
     finally:
         conn.close()
 
@@ -1133,6 +1232,383 @@ def record_note_embedding_failure(note_id: int, error: str) -> None:
                     note_id,
                 ),
             )
+    finally:
+        conn.close()
+
+
+def get_pending_conversation_embeddings(
+    limit: int = 20,
+    lease_owner: str | None = None,
+) -> list[dict]:
+    if not 1 <= limit <= 100:
+        raise ValueError("Embedding batch size must be between 1 and 100.")
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = int(time.time())
+            if lease_owner:
+                conn.execute(
+                    """UPDATE conversation_embedding_jobs
+                          SET lease_owner = NULL, lease_until = 0
+                        WHERE lease_until > 0 AND lease_until <= ?""",
+                    (now,),
+                )
+            rows = conn.execute(
+                """SELECT c.conversation_id, c.user_id, c.title
+                     FROM conversation_embedding_jobs AS j
+                     JOIN conversations AS c
+                       ON c.conversation_id = j.conversation_id
+                      AND c.user_id = j.user_id
+                    WHERE j.next_attempt_at <= ?
+                      AND (
+                           j.lease_owner IS NULL
+                           OR j.lease_until <= ?
+                           OR j.lease_owner = ?
+                          )
+                    ORDER BY j.next_attempt_at, j.conversation_id
+                    LIMIT ?""",
+                (now, now, lease_owner or "", limit),
+            ).fetchall()
+            if lease_owner:
+                lease_until = now + 300
+                conn.executemany(
+                    """UPDATE conversation_embedding_jobs
+                          SET lease_owner = ?, lease_until = ?
+                        WHERE conversation_id = ?""",
+                    [
+                        (lease_owner, lease_until, row["conversation_id"])
+                        for row in rows
+                    ],
+                )
+
+            jobs = []
+            for row in rows:
+                messages = conn.execute(
+                    """SELECT message_id AS id, role, content, created_at
+                         FROM messages
+                        WHERE conversation_id = ? AND user_id = ?
+                        ORDER BY message_id""",
+                    (row["conversation_id"], row["user_id"]),
+                ).fetchall()
+                message_rows = [dict(message) for message in messages]
+                jobs.append(
+                    {
+                        **dict(row),
+                        "id": row["conversation_id"],
+                        "messages": message_rows,
+                        "snapshot_hash": conversation_snapshot_hash(message_rows),
+                    }
+                )
+            return jobs
+    finally:
+        conn.close()
+
+
+def get_conversation_embedding_index(
+    user_id: int,
+    conversation_id: int,
+) -> list[dict]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """SELECT chunk_id, content_hash, model, dimensions, collection
+                 FROM conversation_embedding_index
+                WHERE user_id = ? AND conversation_id = ?""",
+            (user_id, conversation_id),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def record_conversation_embedding_failure(
+    conversation_id: int,
+    error: str,
+) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            row = conn.execute(
+                """SELECT attempts FROM conversation_embedding_jobs
+                     WHERE conversation_id = ?""",
+                (conversation_id,),
+            ).fetchone()
+            if row is None:
+                return
+            attempts = row["attempts"] + 1
+            retry_delay = min(3600, 2 ** min(attempts, 12))
+            conn.execute(
+                """UPDATE conversation_embedding_jobs
+                      SET attempts = ?, next_attempt_at = ?, last_error = ?,
+                          lease_owner = NULL, lease_until = 0
+                    WHERE conversation_id = ?""",
+                (attempts, int(time.time()) + retry_delay, error[:500], conversation_id),
+            )
+    finally:
+        conn.close()
+
+
+def upsert_conversation_embeddings(
+    user_id: int,
+    conversation_id: int,
+    chunks: list[dict],
+    embeddings: dict[str, list[float]],
+    model: str,
+    snapshot_hash: str,
+) -> bool:
+    """Commit a complete chunk snapshot only while the conversation is unchanged."""
+    if not model:
+        raise ValueError("Embedding model is required.")
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conversation = conn.execute(
+                "SELECT 1 FROM conversations WHERE conversation_id = ? AND user_id = ?",
+                (conversation_id, user_id),
+            ).fetchone()
+            if conversation is None:
+                return False
+            current_rows = conn.execute(
+                """SELECT message_id AS id, role, content
+                     FROM messages
+                    WHERE conversation_id = ? AND user_id = ?
+                    ORDER BY message_id""",
+                (conversation_id, user_id),
+            ).fetchall()
+            current_messages = [dict(row) for row in current_rows]
+            if conversation_snapshot_hash(current_messages) != snapshot_hash:
+                return False
+
+            existing_rows = conn.execute(
+                """SELECT * FROM conversation_embedding_index
+                     WHERE conversation_id = ? AND user_id = ?""",
+                (conversation_id, user_id),
+            ).fetchall()
+            existing = {row["chunk_id"]: dict(row) for row in existing_rows}
+            current_ids = {chunk["chunk_id"] for chunk in chunks}
+
+            # Remove stale SQL entries before upserting: chunk indexes can shift
+            # when a branch is edited or a long turn is split differently.
+            stale_rows = [row for key, row in existing.items() if key not in current_ids]
+            if stale_rows:
+                conn.executemany(
+                    "DELETE FROM conversation_embedding_index WHERE chunk_id = ?",
+                    [(row["chunk_id"],) for row in stale_rows],
+                )
+
+            replaced = []
+            for chunk in chunks:
+                previous = existing.get(chunk["chunk_id"])
+                reusable = (
+                    previous is not None
+                    and previous["content_hash"] == chunk["content_hash"]
+                    and previous["model"] == model
+                )
+                if reusable:
+                    collection = previous["collection"]
+                    dimensions = previous["dimensions"]
+                else:
+                    vector = embeddings.get(chunk["chunk_id"])
+                    if vector is None:
+                        raise ValueError("Missing embedding for a changed conversation chunk.")
+                    vector = validate_embedding_vector(vector)
+                    collection = note_vector_index.upsert(
+                        record_id=chunk["chunk_id"],
+                        user_id=user_id,
+                        vector=vector,
+                        model=model,
+                        content_hash=chunk["content_hash"],
+                        entity="conversations",
+                    )
+                    dimensions = len(vector)
+                    if previous is not None and previous["collection"] != collection:
+                        replaced.append((previous["collection"], chunk["chunk_id"]))
+
+                conn.execute(
+                    """INSERT INTO conversation_embedding_index
+                           (chunk_id, conversation_id, user_id, message_start_id,
+                            message_end_id, chunk_index, chunk_content, model,
+                            dimensions, collection, content_hash, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(chunk_id) DO UPDATE SET
+                           message_start_id = excluded.message_start_id,
+                           message_end_id = excluded.message_end_id,
+                           chunk_index = excluded.chunk_index,
+                           chunk_content = excluded.chunk_content,
+                           model = excluded.model,
+                           dimensions = excluded.dimensions,
+                           collection = excluded.collection,
+                           content_hash = excluded.content_hash,
+                           updated_at = excluded.updated_at""",
+                    (
+                        chunk["chunk_id"], conversation_id, user_id,
+                        chunk["message_start_id"], chunk["message_end_id"],
+                        chunk["chunk_index"], chunk["content"], model,
+                        dimensions, collection, chunk["content_hash"], int(time.time()),
+                    ),
+                )
+
+            stale_by_collection: dict[str, list[str]] = {}
+            for row in stale_rows:
+                stale_by_collection.setdefault(row["collection"], []).append(row["chunk_id"])
+            for collection, chunk_ids in stale_by_collection.items():
+                note_vector_index.delete_points(collection, chunk_ids)
+            for collection, chunk_id in replaced:
+                note_vector_index.delete_points(collection, [chunk_id])
+
+            conn.execute(
+                "DELETE FROM conversation_embedding_jobs WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            return True
+    finally:
+        conn.close()
+
+
+def search_conversations_keyword(
+    user_id: int,
+    keyword: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Fallback search over the authoritative SQL conversation history."""
+    if not 1 <= limit <= 100:
+        raise ValueError("Search limit must be between 1 and 100.")
+    conn = get_connection()
+    try:
+        pattern = f"%{keyword.strip()}%"
+        rows = conn.execute(
+            """SELECT c.conversation_id, c.title, c.updated_at,
+                      m.role, m.content, m.message_id
+                 FROM conversations AS c
+                 LEFT JOIN messages AS m
+                   ON m.conversation_id = c.conversation_id AND m.user_id = c.user_id
+                WHERE c.user_id = ?
+                  AND (c.title LIKE ? OR m.content LIKE ?)
+                ORDER BY c.updated_at DESC, m.message_id DESC""",
+            (user_id, pattern, pattern),
+        ).fetchall()
+        results = []
+        seen = set()
+        for row in rows:
+            conversation_id = row["conversation_id"]
+            if conversation_id in seen:
+                continue
+            seen.add(conversation_id)
+            excerpt = f"[{row['role'].upper()}] {row['content']}" if row["content"] else row["title"]
+            results.append(
+                {
+                    "conversation_id": conversation_id,
+                    "title": row["title"],
+                    "excerpt": excerpt[:700],
+                    "updated_at": row["updated_at"],
+                    "score": 0.0,
+                    "message_start_id": row["message_id"] or 0,
+                    "message_end_id": row["message_id"] or 0,
+                }
+            )
+            if len(results) >= limit:
+                break
+        return results
+    finally:
+        conn.close()
+
+
+def search_conversations_hybrid(
+    user_id: int,
+    keyword: str,
+    query_embedding: list[float],
+    model: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Rank indexed conversation chunks by semantic similarity plus keywords."""
+    query_vector = validate_embedding_vector(query_embedding)
+    if not model:
+        raise ValueError("Embedding model is required.")
+    if not 1 <= limit <= 100:
+        raise ValueError("Search limit must be between 1 and 100.")
+
+    conn = get_connection()
+    try:
+        vector_matches = dict(
+            note_vector_index.search(
+                user_id=user_id,
+                vector=query_vector,
+                model=model,
+                limit=max(limit * 4, 20),
+                entity="conversations",
+            )
+        )
+        matching_chunks = set(vector_matches)
+        pattern = f"%{keyword.strip()}%"
+        rows = conn.execute(
+            """SELECT i.chunk_id, i.conversation_id, i.message_start_id,
+                      i.message_end_id, i.chunk_content, i.content_hash,
+                      i.model, i.dimensions, c.title, c.updated_at
+                 FROM conversation_embedding_index AS i
+                 JOIN conversations AS c
+                   ON c.conversation_id = i.conversation_id AND c.user_id = i.user_id
+                WHERE i.user_id = ?
+                  AND (i.chunk_id IN ({placeholders})
+                       OR i.chunk_content LIKE ? OR c.title LIKE ?)""".format(
+                           placeholders=(
+                               ",".join("?" for _ in matching_chunks)
+                               if matching_chunks else "NULL"
+                           )
+                       ),
+            [user_id, *matching_chunks, pattern, pattern],
+        ).fetchall()
+
+        best_by_conversation = {}
+        for row in rows:
+            similarity = vector_matches.get(row["chunk_id"])
+            is_keyword_match = bool(keyword.strip()) and (
+                keyword.casefold() in row["chunk_content"].casefold()
+                or keyword.casefold() in row["title"].casefold()
+            )
+            if (
+                row["model"] != model
+                or row["dimensions"] != len(query_vector)
+                or hashlib.sha256(row["chunk_content"].encode("utf-8")).hexdigest()
+                != row["content_hash"]
+            ):
+                similarity = None
+            if similarity is None and not is_keyword_match:
+                continue
+            semantic_score = (similarity + 1) / 2 if similarity is not None else 0
+            score = 0.8 * semantic_score + 0.2 * is_keyword_match
+            result = {
+                "conversation_id": row["conversation_id"],
+                "title": row["title"],
+                "excerpt": row["chunk_content"][:700],
+                "updated_at": row["updated_at"],
+                "score": score,
+                "message_start_id": row["message_start_id"],
+                "message_end_id": row["message_end_id"],
+            }
+            previous = best_by_conversation.get(row["conversation_id"])
+            if previous is None or result["score"] > previous["score"]:
+                best_by_conversation[row["conversation_id"]] = result
+
+        # Keep recently written, not-yet-embedded chats searchable while the
+        # background worker catches up (and during temporary Qdrant outages).
+        for fallback in search_conversations_keyword(
+            user_id, keyword, limit=max(limit * 2, 20)
+        ):
+            fallback_id = fallback["conversation_id"]
+            if fallback_id not in best_by_conversation:
+                fallback["score"] = 0.2
+                best_by_conversation[fallback_id] = fallback
+
+        ranked = sorted(
+            best_by_conversation.values(),
+            key=lambda item: item["updated_at"] or "",
+            reverse=True,
+        )
+        # Prefer score first, retaining recency as a stable tie-breaker.
+        ranked.sort(key=lambda item: item["score"], reverse=True)
+        return ranked[:limit]
     finally:
         conn.close()
 

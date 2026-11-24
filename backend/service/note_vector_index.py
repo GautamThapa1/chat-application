@@ -1,4 +1,4 @@
-"""Qdrant storage and retrieval for note embeddings."""
+"""Shared Qdrant storage and retrieval for note, memory, and conversation vectors."""
 
 import hashlib
 import os
@@ -46,6 +46,16 @@ def collection_name(model: str, dimensions: int, entity: str = "notes") -> str:
         )
         if prefix == notes_prefix:
             raise ValueError("Notes and memories require separate Qdrant collections.")
+    elif entity == "conversations":
+        prefix = os.getenv("QDRANT_CONVERSATION_COLLECTION_PREFIX") or (
+            f"{notes_prefix}_conversations"
+        )
+        memory_prefix = os.getenv(
+            "QDRANT_MEMORY_COLLECTION_PREFIX",
+            f"{notes_prefix}_memories",
+        )
+        if prefix in {notes_prefix, memory_prefix}:
+            raise ValueError("Conversations require a separate Qdrant collection.")
     else:
         raise ValueError(f"Unknown embedding entity: {entity!r}.")
     suffix = hashlib.sha256(f"{model}:{dimensions}".encode()).hexdigest()[:12]
@@ -68,7 +78,7 @@ def _ensure_collection(name: str, dimensions: int) -> QdrantClient:
 
 def upsert(
     *,
-    record_id: int,
+    record_id: int | str,
     user_id: int,
     vector: list[float],
     model: str,
@@ -104,7 +114,7 @@ def search(
     model: str,
     limit: int,
     entity: str = "notes",
-) -> list[tuple[int, float]]:
+) -> list[tuple[int | str, float]]:
     # Apply the owner filter inside Qdrant so a user never retrieves another
     # user's vector results.
     name = collection_name(model, len(vector), entity)
@@ -129,10 +139,10 @@ def search(
         limit=limit,
         with_payload=False,
     )
-    return [(int(point.id), point.score) for point in results.points]
+    return [(point.id, point.score) for point in results.points]
 
 
-def delete_points(collection: str, point_ids: list[int]) -> None:
+def delete_points(collection: str, point_ids: list[int | str]) -> None:
     if not point_ids:
         return
     client = _client_for_config()

@@ -171,3 +171,90 @@ def test_worker_restart_reclaims_expired_embedding_job(tmp_path, monkeypatch):
         20, lease_owner=second._lease_owner
     )
     assert [job["id"] for job in reclaimed] == [first_jobs[0]["id"]]
+
+
+def test_worker_indexes_conversation_turns_and_reuses_unchanged_chunks(
+    tmp_path, monkeypatch,
+):
+    user_id = _setup_database(tmp_path, monkeypatch)
+    conversation = db.create_conversation(user_id, "Semantic history")
+    db.save_conversation(
+        user_id, conversation["id"], "How do I deploy with Docker?",
+        "Build an image, then start the Compose stack.",
+    )
+    worker = embedding_worker.EmbeddingWorker()
+    embedded_texts = []
+    original_upsert = db.upsert_conversation_embeddings
+
+    def fake_embed(_client, text, **kwargs):
+        embedded_texts.append(text)
+        return [1.0, 0.0]
+
+    def upsert_and_stop(*args, **kwargs):
+        indexed = original_upsert(*args, **kwargs)
+        worker._stop_event.set()
+        return indexed
+
+    monkeypatch.setattr(embedding_worker, "embed_text", fake_embed)
+    monkeypatch.setattr(db, "upsert_conversation_embeddings", upsert_and_stop)
+    worker._process_jobs(object())
+
+    assert len(embedded_texts) == 1
+    first_results = db.search_conversations_hybrid(
+        user_id, "", [1.0, 0.0], "gemini-embedding-001"
+    )
+    assert first_results[0]["conversation_id"] == conversation["id"]
+
+    db.save_conversation(
+        user_id, conversation["id"], "How can I scale the service?",
+        "Run one app worker and scale the backing services independently.",
+    )
+    second_worker = embedding_worker.EmbeddingWorker()
+    original_stop = second_worker._stop_event.set
+
+    def stop_after_second_upsert(*args, **kwargs):
+        indexed = original_upsert(*args, **kwargs)
+        original_stop()
+        return indexed
+
+    monkeypatch.setattr(
+        db, "upsert_conversation_embeddings", stop_after_second_upsert
+    )
+    second_worker._process_jobs(object())
+
+    # Only the newly appended turn needs a document embedding.
+    assert len(embedded_texts) == 2
+    assert len(db.get_conversation_embedding_index(user_id, conversation["id"])) == 2
+
+
+def test_worker_retries_failed_conversation_embedding(tmp_path, monkeypatch):
+    user_id = _setup_database(tmp_path, monkeypatch)
+    conversation = db.create_conversation(user_id, "Retry history")
+    db.save_conversation(user_id, conversation["id"], "Prompt", "Response")
+    worker = embedding_worker.EmbeddingWorker()
+    original_record_failure = db.record_conversation_embedding_failure
+
+    def record_failure_and_stop(conversation_id, error):
+        original_record_failure(conversation_id, error)
+        worker._stop_event.set()
+
+    def fail_embedding(*args, **kwargs):
+        raise RuntimeError("temporary conversation embedding failure")
+
+    monkeypatch.setattr(embedding_worker, "embed_text", fail_embedding)
+    monkeypatch.setattr(
+        db, "record_conversation_embedding_failure", record_failure_and_stop
+    )
+    worker._process_jobs(object())
+
+    conn = db.get_connection()
+    try:
+        job = conn.execute(
+            """SELECT attempts, last_error FROM conversation_embedding_jobs
+                 WHERE conversation_id = ?""",
+            (conversation["id"],),
+        ).fetchone()
+        assert job["attempts"] == 1
+        assert job["last_error"] == "temporary conversation embedding failure"
+    finally:
+        conn.close()
