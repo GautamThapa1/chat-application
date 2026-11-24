@@ -12,6 +12,7 @@ from backend.orchestrator import main
 async def test_lifespan_initializes_and_cleans_up(monkeypatch):
     # Arrange
     monkeypatch.setenv("GEMINI_API_KEY", "fake-api-key")
+    monkeypatch.setenv("GRPC_TARGET", "service:50051")
 
     fake_channel = SimpleNamespace(close=AsyncMock())
     fake_stub = object()
@@ -59,7 +60,7 @@ async def test_lifespan_initializes_and_cleans_up(monkeypatch):
         assert app.state.gemini_client is fake_gemini_client
         assert app.state.gemini_model == main.GEMINI_MODEL
 
-        fake_channel_factory.assert_called_once_with(main.GRPC_TARGET)
+        fake_channel_factory.assert_called_once_with("service:50051")
         fake_stub_factory.assert_called_once_with(fake_channel)
 
         fake_gemini_factory.assert_called_once()

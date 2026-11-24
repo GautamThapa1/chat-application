@@ -10,8 +10,8 @@ A modern AI-powered chat application built with **Python, FastAPI, and Google Ge
 - **User Authentication** — Secure registration, login, and session management.
 - **Chat History** — Create, manage, and delete conversations.
 - **Notes Management** — Save, search, and retrieve personal notes.
-- **Task Management** — Create, list, and complete tasks.
-- **Gemini Function Calling** — Execute note and task actions; clearing notes requires explicit confirmation.
+- **Task Management** — Create, list, complete, and delete tasks; clearing all tasks requires explicit confirmation.
+- **Gemini Function Calling** — Execute note and task actions; clearing notes or tasks requires explicit confirmation.
 - **gRPC Communication** — Separate application logic from the backend service.
 - **SQLite Storage** — Persistent data storage.
 
@@ -117,12 +117,59 @@ make back
 
 Visit [http://localhost:8000](http://localhost:8000).
 
-## 🧪 Testing
+## 🐳 Docker
 
-Run the test suite:
+Run the whole stack (Qdrant, gRPC service, web app) with one command:
 
 ```bash
-make test
+cp .env.example .env        # then set GEMINI_API_KEY and DATABASE_KEY
+docker compose up --build
+```
+
+Open [http://localhost:8000](http://localhost:8000).
+
+- The SQLite database lives in the `app_data` volume and Qdrant vectors in
+  `qdrant_storage`, so data survives `docker compose down`. Only
+  `docker compose down -v` deletes it.
+- Only port `8000` (web) is published. The gRPC port stays on the private
+  compose network.
+- Keep **one** app worker. Running replies are tracked in the app process's
+  memory, so do not scale `app` or add uvicorn workers.
+- Back up `DATABASE_KEY`: the encrypted database cannot be opened without it.
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `GRPC_TARGET` | app | Address of the gRPC service (Compose sets `service:50051`; local default is `127.0.0.1:50051`) |
+| `GRPC_BIND` | service | Interface the gRPC server listens on (default `127.0.0.1`) |
+| `DB_PATH` | service | Database file path (default `app.db`) |
+| `QDRANT_URL` | service | Qdrant address (default `http://localhost:6333`) |
+
+## 🔁 Continuous Integration
+
+`.github/workflows/ci.yml` runs on every pull request and push to `main`:
+
+1. **Backend** — installs locked dependencies, checks the generated gRPC code
+   matches `chat.proto` (`make proto`), and runs `pytest`.
+2. **Frontend** — runs the jsdom tests in `tests/frontend`.
+3. **Docker** — builds the image, smoke-tests its imports, and validates
+   `compose.yaml`. Pushes to `main` and `v*` tags also publish the image to
+   `ghcr.io/<owner>/<repo>`.
+
+CI needs no secrets of its own: tests use a throwaway database key and an
+in-memory Qdrant.
+
+## 🧪 Testing
+
+Run the test suite (set any `DATABASE_KEY` first, or put one in `.env`):
+
+```bash
+DATABASE_KEY=test-key make test
+```
+
+Frontend tests (needs Node 22):
+
+```bash
+cd tests/frontend && npm ci && npm test
 ```
 
 Regenerate gRPC files after modifying the Protocol Buffer definitions:
