@@ -20,14 +20,14 @@ jobs:
     name: Backend tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7 # downloads my repository
 
-      - uses: astral-sh/setup-uv@v10.4.0
+      - uses: astral-sh/setup-uv@v10.4.0 # 
         with:
-          enable-cache: true
+          enable-cache: true # cache depedencies
 
       - name: Install dependencies (exactly as locked)
-        run: uv sync --frozen
+        run: uv sync --frozen # install from my lock file without updating it
 
       # If someone edits chat.proto but forgets `make proto`, the committed
       # generated code is stale. Regenerate and fail if anything changes.
