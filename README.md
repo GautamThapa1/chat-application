@@ -10,9 +10,9 @@ A modern AI-powered chat application built with **Python, FastAPI, and Google Ge
 - **User Authentication** — Secure registration, login, and session management.
 - **Chat History** — Create, manage, and delete conversations.
 - **Notes Management** — Save, search, and retrieve personal notes.
-- **Long-Term Memory** — Automatically retain useful, stable user context in notes, retrieve it when relevant, and undo a newly saved memory.
+- **Long-Term Memory** — Automatically retain useful, stable user context separately from notes, retrieve it when relevant, and undo a newly saved memory.
 - **Task Management** — Create, list, complete, and delete tasks; clearing all tasks requires explicit confirmation.
-- **Gemini Function Calling** — Execute note and task actions; clearing notes or tasks requires explicit confirmation.
+- **Gemini Function Calling** — Execute note, memory, and task actions; clearing notes or tasks requires explicit confirmation.
 - **gRPC Communication** — Separate application logic from the backend service.
 - **SQLite Storage** — Persistent data storage.
 
@@ -78,9 +78,15 @@ embeddings without delaying or undoing note saves. The encrypted SQLite
 database remains the source of truth for note content and indexing jobs;
 Qdrant stores note vectors and performs owner-scoped nearest-neighbor search.
 Existing SQLite vectors are moved to Qdrant on the next indexing pass without
-re-embedding when their model and content hash are still current. Search
-combines semantic similarity with the existing keyword search and falls back
-to keyword-only search if query embedding fails.
+re-embedding when their model and content hash are still current.
+
+Memories are stored in a separate encrypted SQLite table and indexed in a
+distinct Qdrant collection by the shared background worker. The
+`/api/memories` list, search, create, update, and delete endpoints provide a
+separate management API for a future Settings page. Legacy notes titled
+`Memory: ...` are moved into memory storage at startup. Search combines
+semantic similarity with keyword matching and falls back to keyword-only
+search if query embedding fails.
 
 Start a local Qdrant instance before the gRPC service:
 
