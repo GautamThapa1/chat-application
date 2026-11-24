@@ -79,6 +79,9 @@ async function boot({ username = "Gautam", db } = {}) {
   window.fetch = (path, options = {}) => {
     const method = options.method || "GET";
     if (path === "/api/me") return json({ user_id: 1, username });
+    if (path === "/api/conversations/search" && method === "POST") {
+      return json({ results: db.searchResults || [] });
+    }
     if (path.startsWith("/api/conversations?")) {
       return json({
         conversations: db.conversations,
@@ -478,4 +481,33 @@ test("after a reconnect the page re-syncs a reply that kept running", async () =
   assert.equal(page.$(".tool-results"), null);
   assert.doesNotMatch(page.threadText(), /Task added/);
   assert.ok(page.sidebarItem("Chat A").querySelector(".spinner"));
+});
+
+
+test("semantic search shows conversation chunk previews and opens the selected chat", async () => {
+  const page = await boot();
+  page.db.searchResults = [
+    {
+      conversation_id: 2,
+      title: "Chat B",
+      excerpt: "[USER] question B\n[ASSISTANT] answer B",
+      updated_at: new Date().toISOString(),
+      score: 0.93,
+    },
+  ];
+
+  page.$("#conversation-search").value = "how did we solve this?";
+  page.$("#conversation-search-form").dispatchEvent(
+    new page.window.Event("submit", { cancelable: true, bubbles: true }),
+  );
+  await tick(20);
+
+  assert.equal(page.$$(".conversation-search-result").length, 1);
+  assert.match(page.$("#conversations").textContent, /answer B/);
+  assert.match(page.$("#conversation-search-status").textContent, /1 matching chats/);
+
+  page.$(".conversation-search-result").click();
+  await tick(20);
+  assert.match(page.threadText(), /question B/);
+  assert.equal(page.$$(".conversation-search-result").length, 0);
 });

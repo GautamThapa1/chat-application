@@ -32,6 +32,9 @@ const sendButtonEl = $("send");
 const connectionEl = $("connection");
 const logoutButtonEl = $("logout");
 const newChatButtonEl = $("new-chat");
+const conversationSearchFormEl = $("conversation-search-form");
+const conversationSearchEl = $("conversation-search");
+const conversationSearchStatusEl = $("conversation-search-status");
 const conversationsEl = $("conversations");
 const loadMoreConversationsEl = $("load-more-conversations");
 const chatTitleEl = $("chat-title");
@@ -64,6 +67,9 @@ let conversations = []; // sidebar list (newest first)
 let conversationOffset = 0;
 let conversationTotalCount = 0;
 let conversationsLoading = false;
+let conversationSearchActive = false;
+let conversationSearchResults = [];
+let conversationSearchSequence = 0;
 let activeConversationId = null; // null = the blank "new chat" screen
 let stickToBottom = true; // auto-scroll only while the user is at the bottom
 let streamBubble = null; // the element the live reply is written into
@@ -235,6 +241,11 @@ function clearUserState() {
   conversationOffset = 0;
   conversationTotalCount = 0;
   conversationsLoading = false;
+  conversationSearchSequence += 1;
+  conversationSearchActive = false;
+  conversationSearchResults = [];
+  conversationSearchEl.value = "";
+  conversationSearchStatusEl.textContent = "";
   activeConversationId = null;
   streamBubble = null;
   signedIn = false;
@@ -679,7 +690,14 @@ function closeSidebar() {
 // socket and does not cancel anything: the other chat keeps generating.
 function selectConversation(conversationId) {
   closeSidebar();
-  if (conversationId === activeConversationId) return;
+  conversationSearchActive = false;
+  conversationSearchResults = [];
+  conversationSearchEl.value = "";
+  conversationSearchStatusEl.textContent = "";
+  if (conversationId === activeConversationId) {
+    renderConversations();
+    return;
+  }
   saveDraft();
   activeConversationId = conversationId;
   restoreDraft();
@@ -705,6 +723,10 @@ function restoreDraft() {
 // created on the server when the first message is sent. Nothing is cleared.
 function startNewChat() {
   closeSidebar();
+  conversationSearchActive = false;
+  conversationSearchResults = [];
+  conversationSearchEl.value = "";
+  conversationSearchStatusEl.textContent = "";
   if (activeConversationId === null) {
     inputEl.focus();
     return;
@@ -935,9 +957,25 @@ function renderAll() {
 }
 
 function renderConversations() {
-  loadMoreConversationsEl.hidden = conversationOffset >= conversationTotalCount;
+  loadMoreConversationsEl.hidden = conversationSearchActive || conversationOffset >= conversationTotalCount;
   loadMoreConversationsEl.disabled = conversationsLoading;
   conversationsEl.replaceChildren();
+
+  if (conversationSearchActive) {
+    if (!conversationSearchResults.length) {
+      conversationsEl.appendChild(el("p", "conversation-empty", "No matching chats"));
+      return;
+    }
+    for (const result of conversationSearchResults) {
+      const select = el("button", "conversation-search-result");
+      select.type = "button";
+      select.appendChild(el("strong", "", result.title || DEFAULT_TITLE));
+      select.appendChild(el("span", "", result.excerpt || ""));
+      select.addEventListener("click", () => selectConversation(result.conversation_id));
+      conversationsEl.appendChild(select);
+    }
+    return;
+  }
 
   if (!conversations.length) {
     conversationsEl.appendChild(el("p", "conversation-empty", "No chats yet"));
@@ -1322,8 +1360,59 @@ function scrollToBottomIfNeeded() {
   if (stickToBottom) logEl.scrollTop = logEl.scrollHeight;
 }
 
+async function searchPastConversations(query) {
+  const normalized = query.trim();
+  if (!normalized) {
+    conversationSearchActive = false;
+    conversationSearchResults = [];
+    conversationSearchStatusEl.textContent = "";
+    renderConversations();
+    return;
+  }
+
+  const generation = userStateGeneration;
+  const sequence = ++conversationSearchSequence;
+  conversationSearchActive = true;
+  conversationSearchResults = [];
+  conversationSearchStatusEl.textContent = "Searching…";
+  renderConversations();
+  try {
+    const result = await api("/api/conversations/search", "POST", {
+      query: normalized,
+      limit: 20,
+    });
+    if (generation !== userStateGeneration || sequence !== conversationSearchSequence) return;
+    if (!result.ok) {
+      if (result.status === 401) showAuth("Your session has ended. Please log in again.");
+      else conversationSearchStatusEl.textContent = errorMessage(result.data);
+      renderConversations();
+      return;
+    }
+    conversationSearchResults = result.data.results || [];
+    conversationSearchStatusEl.textContent = `${conversationSearchResults.length} matching chats`;
+    renderConversations();
+  } catch {
+    if (generation === userStateGeneration && sequence === conversationSearchSequence) {
+      conversationSearchStatusEl.textContent = "Could not search past chats.";
+      renderConversations();
+    }
+  }
+}
+
 // ---------- Sidebar controls ----------
 newChatButtonEl.addEventListener("click", startNewChat);
+conversationSearchFormEl.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void searchPastConversations(conversationSearchEl.value);
+});
+conversationSearchEl.addEventListener("input", () => {
+  if (conversationSearchEl.value.trim()) return;
+  conversationSearchSequence += 1;
+  conversationSearchActive = false;
+  conversationSearchResults = [];
+  conversationSearchStatusEl.textContent = "";
+  renderConversations();
+});
 loadMoreConversationsEl.addEventListener("click", () => void loadMoreConversations());
 menuButtonEl.addEventListener("click", () => appEl.classList.add("sidebar-open"));
 scrimEl.addEventListener("click", closeSidebar);

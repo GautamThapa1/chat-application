@@ -147,6 +147,41 @@
 
       .new-chat:hover { background: var(--hover); }
 
+      .conversation-search-form {
+        display: flex;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      #conversation-search {
+        width: 100%;
+        min-width: 0;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--text);
+        font: inherit;
+        font-size: 13px;
+      }
+
+      .conversation-search-form button {
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .conversation-search-form button:hover { background: var(--hover); }
+
+      #conversation-search-status {
+        min-height: 18px;
+        margin: 4px 8px 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
       #conversations {
         flex: 1;
         min-height: 0;
@@ -211,6 +246,34 @@
       .conversation-delete:hover { background: var(--danger-soft); color: var(--danger); }
 
       .conversation-empty { padding: 12px; color: var(--muted); font-size: 13px; }
+
+      .conversation-search-result {
+        display: block;
+        width: 100%;
+        padding: 9px 10px;
+        border-radius: 8px;
+        text-align: left;
+      }
+
+      .conversation-search-result:hover { background: var(--hover); }
+      .conversation-search-result strong {
+        display: block;
+        overflow: hidden;
+        font-size: 13px;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .conversation-search-result span {
+        display: -webkit-box;
+        margin-top: 3px;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+      }
 
       #load-more-conversations {
         margin: 4px 4px 0;
@@ -722,6 +785,11 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           New chat
         </button>
+        <form id="conversation-search-form" class="conversation-search-form" role="search">
+          <input id="conversation-search" type="search" placeholder="Search past chats" aria-label="Search past conversations" maxlength="2000" />
+          <button type="submit">Search</button>
+        </form>
+        <p id="conversation-search-status" role="status" aria-live="polite"></p>
         <nav id="conversations" aria-label="Conversations"></nav>
         <button id="load-more-conversations" type="button" hidden>Show more</button>
         <div class="sidebar-user">
