@@ -101,6 +101,7 @@ def test_native_tools_declare_all_supported_operations():
         "list_memories",
         "clear_notes",
         "create_task",
+        "update_task",
         "list_tasks",
         "complete_task",
         "delete_task",
@@ -389,16 +390,37 @@ async def test_task_tools_dispatch_to_the_existing_grpc_methods():
     stub = SimpleNamespace(
         CreateTask=AsyncMock(
             return_value=SimpleNamespace(
-                task=SimpleNamespace(id=9, title="Review", due_date="tomorrow")
+                task=SimpleNamespace(
+                    id=9,
+                    title="Review",
+                    due_at_utc="2099-12-01T17:00:00Z",
+                    timezone="America/Los_Angeles",
+                    legacy_due_date="",
+                )
             )
         ),
         ListTasks=AsyncMock(
             return_value=SimpleNamespace(
                 tasks=[
                     SimpleNamespace(
-                        id=9, title="Review", due_date="tomorrow", completed=False
+                        id=9,
+                        title="Review",
+                        due_at_utc="2099-12-01T17:00:00Z",
+                        timezone="America/Los_Angeles",
+                        legacy_due_date="",
+                        completed=False,
                     )
                 ]
+            )
+        ),
+        UpdateTask=AsyncMock(
+            return_value=SimpleNamespace(
+                task=SimpleNamespace(
+                    id=9,
+                    title="Review",
+                    due_at_utc="2099-12-02T18:30:00Z",
+                    timezone="America/Los_Angeles",
+                )
             )
         ),
         CompleteTask=AsyncMock(
@@ -408,7 +430,7 @@ async def test_task_tools_dispatch_to_the_existing_grpc_methods():
 
     created = await dispatch_tool_call(
         "create_task",
-        {"title": " Review ", "due_date": " tomorrow "},
+        {"title": " Review ", "due_at_local": " 2099-12-01 "},
         stub,
         user_message="Add a task",
         history=[],
@@ -430,15 +452,25 @@ async def test_task_tools_dispatch_to_the_existing_grpc_methods():
         history=[],
         confirmation_token="unused",
     )
+    updated = await dispatch_tool_call(
+        "update_task",
+        {"task_id": 9, "due_at_local": "2099-12-02T10:30"},
+        stub,
+        user_message="Move the deadline",
+        history=[],
+        confirmation_token="unused",
+    )
 
     assert created.response == {
         "task_id": 9,
         "title": "Review",
-        "due_date": "tomorrow",
+        "due_at_utc": "2099-12-01T17:00:00Z",
+        "timezone": "America/Los_Angeles",
         "status": "📌 Task added",
     }
     assert listed.response["tasks"][0]["id"] == 9
     assert listed.response["tasks"][0]["status"] == "⏳ Pending"
+    assert updated.response["due_at_utc"] == "2099-12-02T18:30:00Z"
     assert completed.response == {
         "task_id": 9,
         "success": True,

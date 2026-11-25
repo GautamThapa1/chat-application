@@ -630,7 +630,9 @@ async def test_an_action_is_not_cut_off_by_cancel(monkeypatch):
             task=SimpleNamespace(
                 id=1,
                 title=request.title,
-                due_date=request.due_date,
+                due_at_utc="",
+                timezone="UTC",
+                legacy_due_date="",
             )
         )
 
