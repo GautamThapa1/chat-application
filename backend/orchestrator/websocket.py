@@ -26,7 +26,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 from google.genai import errors
 
 from backend.generated import chat_pb2
-from backend.orchestrator.gemini_service import stream_chat_response
 from backend.orchestrator.intent_handler import (
     handle_function_calls,
     save_conversation,
@@ -195,6 +194,11 @@ async def _run_generation(
         gen.tool_results.append(tool_result)
         await emit("tool_result", index=index, **tool_result)
 
+    async def emit_text(text: str) -> None:
+        offset = len(gen.text)
+        gen.chunks.append(text)
+        await emit("chunk", content=text, offset=offset)
+
     terminal: tuple[str, dict] | None = None
     cancelled = False
     try:
@@ -252,26 +256,15 @@ async def _run_generation(
             history,
             stub,
             on_tool_result=emit_tool_result,
+            on_text=emit_text,
         )
 
-        if tool_response is None:
-            # aclosing() makes sure the Gemini stream is closed right away
-            # if this task is cancelled, instead of whenever it is garbage collected.
-            async with contextlib.aclosing(
-                stream_chat_response(message, gemini_client, model, history)
-            ) as stream:
-                async for chunk in stream:
-                    offset = len(gen.text)  # lets a late viewer drop duplicates
-                    gen.chunks.append(chunk)
-                    await emit("chunk", content=chunk, offset=offset)
+        if tool_response is not None:
+            await emit_text(("\n\n" if gen.text else "") + tool_response)
 
-            response = gen.text
-            if not response:
-                raise ValueError("Gemini returned an empty response.")
-        else:
-            response = tool_response
-            gen.chunks.append(response)
-            await emit("chunk", content=response, offset=0)
+        response = gen.text
+        if not response:
+            raise ValueError("Gemini returned an empty response.")
 
         # Save BEFORE announcing "complete": the database is the source of
         # truth, and it is written even if nobody is watching any more.

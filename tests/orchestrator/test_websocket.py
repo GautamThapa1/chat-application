@@ -108,15 +108,18 @@ async def test_websocket_streams_chat_and_saves_response(monkeypatch):
         create_message("Hello")
     ])
 
-    handle_tools = AsyncMock(return_value=None)
-    save = AsyncMock()
-
-    async def fake_stream(message, client, model, prior_history):
+    async def stream_chat(
+        message, client, model, prior_history, tool_stub, *,
+        on_text, on_tool_result,
+    ):
         assert prior_history == [
             {"role": "user", "content": "Earlier question"}
         ]
-        yield "Hello"
-        yield " there!"
+        await on_text("Hello")
+        await on_text(" there!")
+
+    handle_tools = AsyncMock(side_effect=stream_chat)
+    save = AsyncMock()
 
     monkeypatch.setattr(
         websocket_module,
@@ -128,12 +131,6 @@ async def test_websocket_streams_chat_and_saves_response(monkeypatch):
         "save_conversation",
         save,
     )
-    monkeypatch.setattr(
-        websocket_module,
-        "stream_chat_response",
-        fake_stream,
-    )
-
     # Act
     await websocket_module.websocket_endpoint(
         websocket,
@@ -172,6 +169,7 @@ async def test_websocket_streams_chat_and_saves_response(monkeypatch):
         stub,
     )
     assert callable(handle_tools.await_args.kwargs["on_tool_result"])
+    assert callable(handle_tools.await_args.kwargs["on_text"])
 
     save.assert_awaited_once_with(
         "Hello",
@@ -200,25 +198,18 @@ async def test_websocket_handles_action_request(monkeypatch):
         "status": "📝 Note added",
     }
 
-    async def handle_tools(*args, on_tool_result):
+    async def handle_tools(*args, on_tool_result, on_text):
         await on_tool_result("save_note", tool_result)
+        await on_text("I saved the note.")
         return "Note saved successfully"
 
     handle_tools = AsyncMock(side_effect=handle_tools)
     save = AsyncMock()
 
-    stream_calls = []
-
-    async def fake_stream(message, client, model, history):
-        stream_calls.append(message)
-        yield "Unexpected chat response"
-
     monkeypatch.setattr(
         websocket_module, "handle_function_calls", handle_tools
     )
     monkeypatch.setattr(websocket_module, "save_conversation", save)
-    monkeypatch.setattr(websocket_module, "stream_chat_response", fake_stream)
-
     # Act
     await websocket_module.websocket_endpoint(
         websocket,
@@ -235,6 +226,7 @@ async def test_websocket_handles_action_request(monkeypatch):
         "start",
         "tool_result",
         "chunk",
+        "chunk",
         "complete",
     ]
 
@@ -246,7 +238,8 @@ async def test_websocket_handles_action_request(monkeypatch):
         "tool": "save_note",
         "result": tool_result,
     }
-    assert events[2]["content"] == "Note saved successfully"
+    assert events[2]["content"] == "I saved the note."
+    assert events[3]["content"] == "\n\nNote saved successfully"
 
     assert handle_tools.await_count == 1
     assert handle_tools.await_args.args == (
@@ -258,11 +251,9 @@ async def test_websocket_handles_action_request(monkeypatch):
     )
     assert callable(handle_tools.await_args.kwargs["on_tool_result"])
 
-    assert stream_calls == []
-
     save.assert_awaited_once_with(
         "Save a note about my meeting",
-        "Note saved successfully",
+        "I saved the note.\n\nNote saved successfully",
         stub,
         3,
         "request-1",
@@ -317,18 +308,18 @@ async def test_websocket_does_not_save_incomplete_stream(monkeypatch):
         create_message("Hello")
     ])
 
-    handle_tools = AsyncMock(return_value=None)
     save = AsyncMock()
 
-    async def broken_stream(message, client, model, history):
-        yield "Partial response"
+    async def broken_stream(
+        message, client, model, history, stub, *, on_text, on_tool_result
+    ):
+        await on_text("Partial response")
         raise ValueError("Streaming failed")
 
     monkeypatch.setattr(
-        websocket_module, "handle_function_calls", handle_tools
+        websocket_module, "handle_function_calls", broken_stream
     )
     monkeypatch.setattr(websocket_module, "save_conversation", save)
-    monkeypatch.setattr(websocket_module, "stream_chat_response", broken_stream)
 
     # Act
     await websocket_module.websocket_endpoint(
@@ -379,17 +370,15 @@ async def test_websocket_does_not_process_a_foreign_conversation(monkeypatch):
     handle_tools.assert_not_awaited()
 
 def patch_chat(monkeypatch):
-    """Replace tool selection and streaming; return the tool-selection mock."""
-    handle_tools = AsyncMock(return_value=None)
+    """Replace tool selection and text streaming for websocket tests."""
+    async def fake_tools(*args, on_text, on_tool_result):
+        await on_text("ok")
 
-    async def fake_stream(message, client, model, prior_history):
-        yield "ok"
-
+    handle_tools = AsyncMock(side_effect=fake_tools)
     monkeypatch.setattr(
         websocket_module, "handle_function_calls", handle_tools
     )
     monkeypatch.setattr(websocket_module, "save_conversation", AsyncMock())
-    monkeypatch.setattr(websocket_module, "stream_chat_response", fake_stream)
     return handle_tools
 
 
@@ -525,12 +514,14 @@ def patch_blocking_stream(monkeypatch, *, first_chunk="Hel"):
     state = {"cancelled": False, "parked": asyncio.Event()}
     save = AsyncMock()
 
-    async def stream(message, client, model, history):
+    async def stream(
+        message, client, model, history, stub, *, on_text, on_tool_result
+    ):
         try:
-            yield first_chunk
+            await on_text(first_chunk)
             state["parked"].set()  # the reply is now waiting for the test
             await release.wait()
-            yield "lo"
+            await on_text("lo")
         except asyncio.CancelledError:
             state["cancelled"] = True
             raise
@@ -538,9 +529,8 @@ def patch_blocking_stream(monkeypatch, *, first_chunk="Hel"):
     monkeypatch.setattr(
         websocket_module,
         "handle_function_calls",
-        AsyncMock(return_value=None),
+        stream,
     )
-    monkeypatch.setattr(websocket_module, "stream_chat_response", stream)
     monkeypatch.setattr(websocket_module, "save_conversation", save)
     return release, state, save
 
@@ -584,7 +574,7 @@ async def test_cancel_before_any_text_saves_nothing(monkeypatch):
     gate = asyncio.Event()
 
     async def slow_tool_selection(
-        message, client, model, history, stub, *, on_tool_result
+        message, client, model, history, stub, *, on_tool_result, on_text
     ):
         await gate.wait()
 
@@ -646,30 +636,40 @@ async def test_an_action_is_not_cut_off_by_cancel(monkeypatch):
 
     stub = fake_stub()
     stub.CreateTask = AsyncMock(side_effect=slow_create_task)
+    initial_response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                name="create_task",
+                                args={"title": "Task"},
+                            )
+                        )
+                    ],
+                )
+            )
+        ],
+        text=None,
+    )
+
+    async def initial_stream():
+        yield initial_response
+
+    async def generate_content_stream(**kwargs):
+        return initial_stream()
+
     client = SimpleNamespace(
         models=SimpleNamespace(
             count_tokens=AsyncMock(
                 return_value=SimpleNamespace(total_tokens=1)
             ),
+            generate_content_stream=AsyncMock(
+                side_effect=generate_content_stream
+            ),
             generate_content=AsyncMock(side_effect=[
-                SimpleNamespace(
-                    candidates=[
-                        SimpleNamespace(
-                            content=types.Content(
-                                role="model",
-                                parts=[
-                                    types.Part(
-                                        function_call=types.FunctionCall(
-                                            name="create_task",
-                                            args={"title": "Task"},
-                                        )
-                                    )
-                                ],
-                            )
-                        )
-                    ],
-                    text=None,
-                ),
                 SimpleNamespace(
                     candidates=[
                         SimpleNamespace(
@@ -883,7 +883,7 @@ async def test_tool_results_resync_and_continue_after_client_disconnect(monkeypa
     second_result = {"tasks": [{"id": 9, "title": "Task"}]}
 
     async def handle_tools(
-        message, client, model, history, stub, *, on_tool_result
+        message, client, model, history, stub, *, on_tool_result, on_text
     ):
         started.set()
         await first_result_ready.wait()
@@ -1047,7 +1047,9 @@ async def test_conversation_is_free_again_when_the_reply_finishes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tool_failure_reports_error_after_prior_tool_result(monkeypatch):
-    async def failing_tools(message, client, model, history, stub, *, on_tool_result):
+    async def failing_tools(
+        message, client, model, history, stub, *, on_tool_result, on_text
+    ):
         await on_tool_result("create_task", {
             "task_id": 9,
             "status": "📌 Task added",
@@ -1076,14 +1078,12 @@ async def test_tool_failure_reports_error_after_prior_tool_result(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unexpected_crash_reports_an_error_and_frees_the_conversation(monkeypatch):
-    async def crashing_stream(message, client, model, history):
+    async def crashing_stream(
+        message, client, model, history, stub, *, on_text, on_tool_result
+    ):
         raise RuntimeError("boom")
-        yield  # pragma: no cover - makes this an async generator
 
-    monkeypatch.setattr(
-        websocket_module, "handle_function_calls", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(websocket_module, "stream_chat_response", crashing_stream)
+    monkeypatch.setattr(websocket_module, "handle_function_calls", crashing_stream)
     monkeypatch.setattr(websocket_module, "save_conversation", AsyncMock())
     ws = LiveWebSocket()
     task = start_endpoint(ws)

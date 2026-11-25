@@ -1,6 +1,7 @@
 """Gemini function tools and their authenticated gRPC dispatcher."""
 
 import asyncio
+import contextlib
 import logging
 import re
 import secrets
@@ -760,19 +761,32 @@ async def handle_function_calls(
     stub,
     *,
     on_tool_result: ToolResultCallback | None = None,
+    on_text: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
-    """Return a tool-based reply, or None when the request is normal chat."""
+    """Stream initial text and return a tool-based reply, if any."""
     contents = await bounded_contents(message, gemini_client, model, history)
-    response = await gemini_client.models.generate_content(
+    stream = await gemini_client.models.generate_content_stream(
         model=model,
         contents=contents,
         config=TOOL_CONFIG,
     )
-    content, calls = _response_content_and_calls(response)
+    parts = []
+    calls = []
+    async with contextlib.aclosing(stream):
+        async for chunk in stream:
+            candidates = chunk.candidates or []
+            if not candidates or candidates[0].content is None:
+                continue
+            for part in candidates[0].content.parts or []:
+                parts.append(part)
+                if part.function_call is not None:
+                    calls.append(part.function_call)
+                elif part.text and on_text is not None:
+                    await on_text(part.text)
+
     if not calls:
         return None
-    if content is None:
-        raise ValueError("Gemini returned tool calls without response content.")
+    content = types.Content(role="model", parts=parts)
 
     task = asyncio.create_task(
         _continue_function_calls(

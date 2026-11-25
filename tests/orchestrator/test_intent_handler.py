@@ -32,12 +32,21 @@ def function_response(*calls, text=None):
 
 
 def gemini_client(*responses):
+    async def stream_response(response):
+        yield response
+
+    async def generate_content_stream(**kwargs):
+        return stream_response(responses[0])
+
     return SimpleNamespace(
         models=SimpleNamespace(
             count_tokens=AsyncMock(
                 return_value=SimpleNamespace(total_tokens=1)
             ),
-            generate_content=AsyncMock(side_effect=responses),
+            generate_content_stream=AsyncMock(
+                side_effect=generate_content_stream
+            ),
+            generate_content=AsyncMock(side_effect=responses[1:]),
         )
     )
 
@@ -62,13 +71,20 @@ def test_detect_prompt_injection_returns_false_for_normal_text():
 @pytest.mark.asyncio
 async def test_normal_chat_returns_to_streaming_path():
     client = gemini_client(function_response(text="A non-tool response."))
+    streamed_text = []
+
+    async def on_text(text):
+        streamed_text.append(text)
 
     result = await handle_function_calls(
-        "Hello", client, "test-model", [], SimpleNamespace()
+        "Hello", client, "test-model", [], SimpleNamespace(),
+        on_text=on_text,
     )
 
     assert result is None
-    client.models.generate_content.assert_awaited_once()
+    assert streamed_text == ["A non-tool response."]
+    client.models.generate_content_stream.assert_awaited_once()
+    client.models.generate_content.assert_not_awaited()
 
 
 def test_native_tools_declare_all_supported_operations():
@@ -302,7 +318,7 @@ async def test_retrieved_memory_is_provided_to_gemini_before_its_reply():
     )
 
     assert reply == "I'll keep my replies concise."
-    next_request = client.models.generate_content.await_args_list[1].kwargs
+    next_request = client.models.generate_content.await_args_list[0].kwargs
     memory_result = next_request["contents"][-1].parts[0].function_response.response
     assert memory_result["memories"][0]["content"] == (
         "The user prefers concise answers."
@@ -535,7 +551,7 @@ async def test_multiple_tool_calls_are_executed_and_results_returned_to_gemini()
     ]
     assert stub.SaveNote.await_count == 1
     assert stub.ListTasks.await_count == 1
-    second_request = client.models.generate_content.await_args_list[1].kwargs
+    second_request = client.models.generate_content.await_args_list[0].kwargs
     function_responses = second_request["contents"][-1]
     assert function_responses.role == "user"
     assert [part.function_response.name for part in function_responses.parts] == [
@@ -570,7 +586,7 @@ async def test_function_call_loop_supports_additional_tool_rounds():
     )
 
     assert result == "I found notes and listed your tasks."
-    assert client.models.generate_content.await_count == 3
+    assert client.models.generate_content.await_count == 2
     assert stub.SearchNotes.await_count == 1
     assert stub.ListTasks.await_count == 1
 
@@ -595,7 +611,7 @@ async def test_grpc_tool_failure_is_propagated():
             "List my tasks", client, "test-model", [], stub
         )
 
-    assert client.models.generate_content.await_count == 1
+    client.models.generate_content.assert_not_awaited()
 
 
 @pytest.mark.asyncio
