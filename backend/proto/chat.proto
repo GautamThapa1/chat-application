@@ -16,7 +16,7 @@ message ChatResponse {
   string content = 2;
 }
 
-# frontend sends one request
+// Frontend sends one request.
 message ChatTurnRequest {
   int64  conversation_id      = 1;
   string message              = 2;
@@ -49,7 +49,7 @@ message ChatError {
   string message = 1;
 }
 
-# sends multiple chat response but oneof a kind
+// Sends multiple chat responses, each with one payload.
 message ChatEvent {
   string request_id = 1;
   oneof payload {
