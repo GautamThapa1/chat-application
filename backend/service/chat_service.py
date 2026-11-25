@@ -414,6 +414,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             )
         except ValueError as exc:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        # this passes memory to memory_store.py    
         return chat_pb2.ListMemoriesResponse(
             memories=[
                 chat_pb2.Memory(
