@@ -182,6 +182,25 @@
         font-size: 12px;
       }
 
+      #enable-task-reminders {
+        width: 100%;
+        margin-top: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        text-align: left;
+        font-size: 13px;
+      }
+
+      #enable-task-reminders:hover { background: var(--hover); }
+
+      #task-reminder-status {
+        min-height: 16px;
+        margin: 4px 8px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
       #conversations {
         flex: 1;
         min-height: 0;
@@ -792,6 +811,10 @@
         <p id="conversation-search-status" role="status" aria-live="polite"></p>
         <nav id="conversations" aria-label="Conversations"></nav>
         <button id="load-more-conversations" type="button" hidden>Show more</button>
+        <button id="enable-task-reminders" type="button" hidden>
+          Enable task reminders
+        </button>
+        <p id="task-reminder-status" role="status" aria-live="polite"></p>
         <div class="sidebar-user">
           <div id="user-avatar" class="avatar" aria-hidden="true">?</div>
           <div class="user-meta">

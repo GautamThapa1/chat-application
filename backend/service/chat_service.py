@@ -491,7 +491,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             result = db.create_task_idempotent(
                 current_user_id(),
                 request.title,
-                request.due_date or None,
+                request.due_at_local,
                 request.idempotency_key,
             )
         except db.IdempotencyConflict as exc:
@@ -504,7 +504,37 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             task=chat_pb2.Task(
                 id=result["id"],
                 title=result["title"],
-                due_date=result["due_date"],
+                due_at_utc=result["due_at_utc"],
+                timezone=result["timezone"],
+                legacy_due_date=result["legacy_due_date"],
+                completed=result["completed"],
+                created_at=result["created_at"],
+            )
+        )
+
+    def UpdateTask(self, request, context):
+        try:
+            result = db.update_task_deadline_idempotent(
+                current_user_id(),
+                request.task_id,
+                request.due_at_local,
+                request.idempotency_key,
+            )
+        except db.IdempotencyConflict as exc:
+            context.abort(grpc.StatusCode.ALREADY_EXISTS, str(exc))
+        except db.IdempotencyInProgress as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        if not result.get("found"):
+            context.abort(grpc.StatusCode.NOT_FOUND, "Task not found.")
+        return chat_pb2.UpdateTaskResponse(
+            task=chat_pb2.Task(
+                id=result["id"],
+                title=result["title"],
+                due_at_utc=result["due_at_utc"],
+                timezone=result["timezone"],
+                legacy_due_date=result["legacy_due_date"],
                 completed=result["completed"],
                 created_at=result["created_at"],
             )
@@ -517,7 +547,9 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                 chat_pb2.Task(
                     id=r["id"],
                     title=r["title"],
-                    due_date=r["due_date"] or "",
+                    due_at_utc=r["due_at_utc"],
+                    timezone=r["timezone"],
+                    legacy_due_date=r["legacy_due_date"],
                     completed=bool(r["completed"]),
                     created_at=str(r["created_at"] or ""),
                 )
@@ -568,6 +600,37 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         except ValueError as exc:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
         return chat_pb2.ClearTasksResponse(deleted_count=result["deleted_count"])
+
+    def SetUserTimezone(self, request, context):
+        try:
+            if not db.set_user_timezone(current_user_id(), request.timezone):
+                context.abort(grpc.StatusCode.NOT_FOUND, "User not found.")
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.SetUserTimezoneResponse()
+
+    def SavePushSubscription(self, request, context):
+        if not request.endpoint or not request.p256dh or not request.auth:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "Push endpoint and keys are required.",
+            )
+        try:
+            db.save_push_subscription(
+                current_user_id(),
+                request.endpoint,
+                request.p256dh,
+                request.auth,
+            )
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return chat_pb2.SavePushSubscriptionResponse()
+
+    def DeletePushSubscription(self, request, context):
+        success = db.delete_push_subscription(
+            current_user_id(), request.endpoint
+        )
+        return chat_pb2.DeletePushSubscriptionResponse(success=success)
 
 
 def _conversation_message(row: dict) -> chat_pb2.Conversation:

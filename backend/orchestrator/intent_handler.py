@@ -221,16 +221,44 @@ FUNCTION_DECLARATIONS = [
     ),
     types.FunctionDeclaration(
         name="create_task",
-        description="Create a task for the signed-in user.",
+        description=(
+            "Create a task for the signed-in user. Use due_at_local for a "
+            "local ISO date or datetime; a date-only value means 9:00 AM in "
+            "the user's timezone."
+        ),
         parameters=_object_schema(
             {
                 "title": _schema("STRING", description="The task title.", min_length=1),
-                "due_date": _schema(
+                "due_at_local": _schema(
                     "STRING",
-                    description="Optional due date, preferably YYYY-MM-DD.",
+                    description="Optional ISO local date or datetime.",
                 ),
             },
             required=["title"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="update_task",
+        description=(
+            "Change or clear a task deadline. Use list_tasks first if the "
+            "task's numeric ID is not known."
+        ),
+        parameters=_object_schema(
+            {
+                "task_id": _schema(
+                    "INTEGER",
+                    description="The task's numeric ID.",
+                    minimum=1,
+                ),
+                "due_at_local": _schema(
+                    "STRING",
+                    description=(
+                        "New ISO local date or datetime; an empty string "
+                        "clears the deadline. Date-only values mean 9:00 AM."
+                    ),
+                ),
+            },
+            required=["task_id", "due_at_local"],
         ),
     ),
     types.FunctionDeclaration(
@@ -309,7 +337,8 @@ _TOOL_FIELDS = {
     "list_notes": (set(), set()),
     "list_memories": (set(), set()),
     "clear_notes": (set(), set()),
-    "create_task": ({"title"}, {"title", "due_date"}),
+    "create_task": ({"title"}, {"title", "due_at_local"}),
+    "update_task": ({"task_id", "due_at_local"}, {"task_id", "due_at_local"}),
     "list_tasks": (set(), set()),
     "complete_task": ({"task_id"}, {"task_id"}),
     "delete_task": ({"task_id"}, {"task_id"}),
@@ -374,11 +403,19 @@ def _validate_arguments(name: str, arguments: Any) -> dict[str, Any]:
         if not isinstance(keyword, str) or not keyword.strip():
             raise ValueError("The keyword must be a non-empty string.")
         arguments = {**arguments, "keyword": keyword.strip()}
-    elif name == "create_task":
-        due_date = arguments.get("due_date", "")
-        if not isinstance(due_date, str):
-            raise ValueError("The due_date must be a string.")
-        arguments = {**arguments, "due_date": due_date.strip()}
+    elif name in {"create_task", "update_task"}:
+        due_at_local = arguments.get("due_at_local", "")
+        if not isinstance(due_at_local, str):
+            raise ValueError("The due_at_local must be a string.")
+        arguments = {**arguments, "due_at_local": due_at_local.strip()}
+        if name == "update_task":
+            task_id = arguments.get("task_id")
+            if (
+                isinstance(task_id, bool)
+                or not isinstance(task_id, int)
+                or not 1 <= task_id <= 2**63 - 1
+            ):
+                raise ValueError("The task_id must be a positive 64-bit integer.")
     elif name in {"complete_task", "delete_task", "delete_memory"}:
         id_field = "memory_id" if name == "delete_memory" else "task_id"
         entity_id = arguments.get(id_field)
@@ -421,6 +458,7 @@ async def dispatch_tool_call(
     history: list[dict[str, str]],
     confirmation_token: str,
     gemini_client=None,
+    idempotency_key: str | None = None,
 ) -> ToolExecutionResult:
     """Validate and execute one declared tool through the authenticated gRPC stub."""
     if name not in _TOOL_FIELDS:
@@ -594,14 +632,32 @@ async def dispatch_tool_call(
         result = await stub.CreateTask(
             chat_pb2.CreateTaskRequest(
                 title=args["title"],
-                due_date=args["due_date"],
+                due_at_local=args["due_at_local"],
+                idempotency_key=idempotency_key or secrets.token_urlsafe(24),
             )
         )
         return ToolExecutionResult({
             "task_id": result.task.id,
             "title": result.task.title,
-            "due_date": result.task.due_date,
+            "due_at_utc": result.task.due_at_utc or result.task.legacy_due_date,
+            "timezone": result.task.timezone,
             "status": "📌 Task added",
+        })
+
+    if name == "update_task":
+        result = await stub.UpdateTask(
+            chat_pb2.UpdateTaskRequest(
+                task_id=args["task_id"],
+                due_at_local=args["due_at_local"],
+                idempotency_key=idempotency_key or secrets.token_urlsafe(24),
+            )
+        )
+        return ToolExecutionResult({
+            "task_id": result.task.id,
+            "title": result.task.title,
+            "due_at_utc": result.task.due_at_utc,
+            "timezone": result.task.timezone,
+            "status": "📅 Task deadline updated",
         })
 
     if name == "list_tasks":
@@ -611,7 +667,8 @@ async def dispatch_tool_call(
                 {
                     "id": task.id,
                     "title": task.title,
-                    "due_date": task.due_date,
+                    "due_at_utc": task.due_at_utc or task.legacy_due_date,
+                    "timezone": task.timezone,
                     "completed": task.completed,
                     "status": "✅ Completed" if task.completed else "⏳ Pending",
                 }
@@ -622,7 +679,10 @@ async def dispatch_tool_call(
     if name == "delete_task":
         task_id = args["task_id"]
         result = await stub.DeleteTask(
-            chat_pb2.DeleteTaskRequest(task_id=task_id)
+            chat_pb2.DeleteTaskRequest(
+                task_id=task_id,
+                idempotency_key=idempotency_key or secrets.token_urlsafe(24),
+            )
         )
         return ToolExecutionResult({
             "task_id": task_id,
@@ -641,7 +701,11 @@ async def dispatch_tool_call(
                 {"confirmation_required": True, "message": prompt},
                 confirmation_prompt=prompt,
             )
-        result = await stub.ClearTasks(chat_pb2.ClearTasksRequest())
+        result = await stub.ClearTasks(
+            chat_pb2.ClearTasksRequest(
+                idempotency_key=idempotency_key or secrets.token_urlsafe(24)
+            )
+        )
         return ToolExecutionResult({
             "deleted_count": result.deleted_count,
             "status": (
@@ -653,7 +717,10 @@ async def dispatch_tool_call(
 
     task_id = args["task_id"]
     result = await stub.CompleteTask(
-        chat_pb2.CompleteTaskRequest(task_id=task_id)
+        chat_pb2.CompleteTaskRequest(
+            task_id=task_id,
+            idempotency_key=idempotency_key or secrets.token_urlsafe(24),
+        )
     )
     return ToolExecutionResult({
         "task_id": task_id,
@@ -721,6 +788,8 @@ async def _continue_function_calls(
                 history=history,
                 confirmation_token=confirmation_token,
                 gemini_client=gemini_client,
+                idempotency_key=getattr(call, "id", None)
+                or secrets.token_urlsafe(24),
             )
             if on_tool_result is not None:
                 await on_tool_result(call.name, result.response)

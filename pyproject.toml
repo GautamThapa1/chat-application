@@ -11,6 +11,7 @@ dependencies = [
     "grpcio-tools>=1.85.3",
     "limits>=5.8.0",
     "python-dotenv>=1.2.4",
+    "pywebpush>=2.0,<3",
     "qdrant-client>=1.12,<2",
     "slowapi>=0.1.10",
     "sqlcipher3-binary>=0.6.0",

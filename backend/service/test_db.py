@@ -3,6 +3,7 @@
 import sqlite3
 import struct
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -614,16 +615,160 @@ def test_legacy_sql_vectors_are_moved_to_qdrant_without_reembedding(
 
 def test_tasks_are_isolated_and_updates_check_owner(owners_db):
     user_a, user_b = owners_db
-    task_a = db.create_task(user_a, "Write report", due_date="2026-12-01")
+    assert db.set_user_timezone(user_a, "America/Los_Angeles")
+    task_a = db.create_task(
+        user_a, "Write report", due_at_local="2099-12-01"
+    )
     task_b = db.create_task(user_b, "Private task")
 
     assert task_a > 0 and task_b > 0
-    assert [task["title"] for task in db.get_tasks(user_a)] == ["Write report"]
+    task = db.get_tasks(user_a)[0]
+    assert task["title"] == "Write report"
+    assert task["due_at_utc"] == "2099-12-01T17:00:00Z"
+    assert task["timezone"] == "America/Los_Angeles"
+    conn = db.get_connection()
+    try:
+        reminder = conn.execute(
+            "SELECT scheduled_at, status FROM task_reminders WHERE task_id = ?",
+            (task_a,),
+        ).fetchone()
+        deadline = int(
+            datetime(2099, 12, 1, 17, tzinfo=timezone.utc).timestamp()
+        )
+        assert reminder["scheduled_at"] == deadline - 15 * 60
+        assert reminder["status"] == "pending"
+    finally:
+        conn.close()
     assert [task["title"] for task in db.get_tasks(user_b)] == ["Private task"]
     assert db.complete_task(user_b, task_a) is False
-    assert db.get_tasks(user_a)[0]["completed"] == 0
+    assert db.get_tasks(user_a)[0]["completed"] is False
     assert db.complete_task(user_a, task_a) is True
-    assert db.get_tasks(user_a)[0]["completed"] == 1
+    assert db.get_tasks(user_a)[0]["completed"] is True
+    conn = db.get_connection()
+    try:
+        assert conn.execute(
+            "SELECT status FROM task_reminders WHERE task_id = ?",
+            (task_a,),
+        ).fetchone()["status"] == "cancelled"
+    finally:
+        conn.close()
+
+
+def test_task_deadline_update_reuses_pending_reminder(owners_db):
+    user_id, _ = owners_db
+    assert db.set_user_timezone(user_id, "America/Los_Angeles")
+    task_id = db.create_task(
+        user_id, "Submit project", due_at_local="2099-12-01"
+    )
+
+    updated = db.update_task_deadline_idempotent(
+        user_id,
+        task_id,
+        "2099-12-02T10:30",
+        "reschedule-project",
+    )
+
+    assert updated["found"] is True
+    assert updated["due_at_utc"] == "2099-12-02T18:30:00Z"
+    conn = db.get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT scheduled_at, status FROM task_reminders WHERE task_id = ?",
+            (task_id,),
+        ).fetchall()
+        assert len(rows) == 1
+        deadline = int(
+            datetime(2099, 12, 2, 18, 30, tzinfo=timezone.utc).timestamp()
+        )
+        assert rows[0]["scheduled_at"] == deadline - 15 * 60
+        assert rows[0]["status"] == "pending"
+        with conn:
+            conn.execute(
+                "UPDATE task_reminders SET status = 'sent' WHERE task_id = ?",
+                (task_id,),
+            )
+    finally:
+        conn.close()
+    db.update_task_deadline(
+        user_id,
+        task_id,
+        "2099-12-02T10:30",
+    )
+    conn = db.get_connection()
+    try:
+        assert conn.execute(
+            "SELECT status FROM task_reminders WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()["status"] == "sent"
+    finally:
+        conn.close()
+
+
+def test_timezone_change_migrates_legacy_date_only_tasks(owners_db):
+    user_id, _ = owners_db
+    conn = db.get_connection()
+    try:
+        with conn:
+            cursor = conn.execute(
+                """INSERT INTO tasks (user_id, title, due_date)
+                   VALUES (?, ?, ?)""",
+                (user_id, "Legacy task", "2099-12-01"),
+            )
+            task_id = cursor.lastrowid
+    finally:
+        conn.close()
+
+    assert db.set_user_timezone(user_id, "America/Los_Angeles")
+    task = next(task for task in db.get_tasks(user_id) if task["id"] == task_id)
+    assert task["due_at_utc"] == "2099-12-01T17:00:00Z"
+    assert task["legacy_due_date"] == ""
+
+
+def test_nonexistent_local_deadline_is_rejected(owners_db):
+    user_id, _ = owners_db
+    assert db.set_user_timezone(user_id, "America/Los_Angeles")
+
+    with pytest.raises(ValueError, match="nonexistent local time"):
+        db.create_task(
+            user_id,
+            "Spring transition",
+            due_at_local="2026-03-08T02:30",
+        )
+
+
+def test_push_subscriptions_reject_non_push_endpoints(owners_db):
+    user_id, _ = owners_db
+
+    with pytest.raises(ValueError, match="supported HTTPS push service"):
+        db.save_push_subscription(
+            user_id,
+            "http://127.0.0.1:8080/internal",
+            "p256dh",
+            "auth",
+        )
+
+
+def test_due_reminder_is_claimed_once_and_cancelled_on_completion(owners_db):
+    user_id, _ = owners_db
+    deadline = (
+        datetime.now(timezone.utc).replace(microsecond=0)
+        + timedelta(minutes=5)
+    )
+    task_id = db.create_task(
+        user_id,
+        "Soon",
+        due_at_local=deadline.isoformat(),
+    )
+
+    reminders = db.claim_due_task_reminders(
+        lease_owner="worker-one"
+    )
+
+    assert [item["task_id"] for item in reminders] == [task_id]
+    assert db.task_reminder_is_sendable(task_id, "worker-one")
+    assert db.claim_due_task_reminders(lease_owner="worker-two") == []
+    assert db.complete_task(user_id, task_id)
+    assert not db.task_reminder_is_sendable(task_id, "worker-one")
 
 
 

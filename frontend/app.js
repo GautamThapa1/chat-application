@@ -42,6 +42,8 @@ const menuButtonEl = $("menu");
 const scrimEl = $("scrim");
 const userNameEl = $("user-name");
 const userAvatarEl = $("user-avatar");
+const taskReminderButtonEl = $("enable-task-reminders");
+const taskReminderStatusEl = $("task-reminder-status");
 const authFormEl = $("auth-form");
 const authTitleEl = $("auth-title");
 const authUsernameEl = $("auth-username");
@@ -60,6 +62,8 @@ let pongTimer = null;
 
 let signedIn = false;
 let username = "";
+let pushRegistration = null;
+let pushSubscription = null;
 let authMode = "login";
 let userStateGeneration = 0; // bumped on login/logout so late responses are dropped
 
@@ -194,6 +198,107 @@ async function api(path, method = "GET", body) {
   return { ok: response.ok, status: response.status, data };
 }
 
+function setTaskReminderStatus(message) {
+  taskReminderStatusEl.textContent = message;
+}
+
+function decodeBase64Url(value) {
+  const padding = "=".repeat((4 - value.length % 4) % 4);
+  const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+}
+
+async function savePushSubscription(subscription) {
+  const serialized = subscription.toJSON();
+  if (!serialized.endpoint || !serialized.keys?.p256dh || !serialized.keys?.auth) {
+    throw new Error("The browser returned an incomplete push subscription.");
+  }
+  const result = await api("/api/push/subscription", "POST", serialized);
+  if (!result.ok) throw new Error(errorMessage(result.data));
+}
+
+async function syncTaskReminderSettings() {
+  taskReminderButtonEl.hidden = true;
+  taskReminderStatusEl.textContent = "";
+  try {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (timezone) {
+      const result = await api("/api/timezone", "POST", { timezone });
+      if (!result.ok) {
+        setTaskReminderStatus(`Timezone was not saved: ${errorMessage(result.data)}`);
+      }
+    }
+
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setTaskReminderStatus("Web Push is not supported in this browser.");
+      return;
+    }
+
+    const config = await api("/api/push/config");
+    if (!config.ok) throw new Error(errorMessage(config.data));
+    if (!config.data?.enabled || !config.data.publicKey) {
+      setTaskReminderStatus("Task reminders are not configured on this server.");
+      return;
+    }
+
+    pushRegistration = await navigator.serviceWorker.register("/service-worker.js");
+    pushSubscription = await pushRegistration.pushManager.getSubscription();
+    taskReminderButtonEl.hidden = false;
+    if (pushSubscription) {
+      await savePushSubscription(pushSubscription);
+      taskReminderButtonEl.textContent = "Disable task reminders";
+      setTaskReminderStatus("Task reminders are enabled on this device.");
+    } else {
+      taskReminderButtonEl.textContent = "Enable task reminders";
+    }
+  } catch (error) {
+    setTaskReminderStatus(`Task reminders unavailable: ${error.message}`);
+  }
+}
+
+taskReminderButtonEl.addEventListener("click", async () => {
+  taskReminderButtonEl.disabled = true;
+  setTaskReminderStatus("");
+  try {
+    if (pushSubscription) {
+      const result = await api(
+        "/api/push/subscription",
+        "DELETE",
+        { endpoint: pushSubscription.endpoint },
+      );
+      if (!result.ok) throw new Error(errorMessage(result.data));
+      await pushSubscription.unsubscribe();
+      pushSubscription = null;
+      taskReminderButtonEl.textContent = "Enable task reminders";
+      setTaskReminderStatus("Task reminders are disabled on this device.");
+      return;
+    }
+
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      setTaskReminderStatus("Allow notifications in your browser to enable reminders.");
+      return;
+    }
+
+    const config = await api("/api/push/config");
+    if (!config.ok || !config.data?.publicKey) {
+      throw new Error(errorMessage(config.data));
+    }
+    pushRegistration ??= await navigator.serviceWorker.register("/service-worker.js");
+    pushSubscription = await pushRegistration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: decodeBase64Url(config.data.publicKey),
+    });
+    await savePushSubscription(pushSubscription);
+    taskReminderButtonEl.textContent = "Disable task reminders";
+    setTaskReminderStatus("Task reminders are enabled on this device.");
+  } catch (error) {
+    setTaskReminderStatus(`Could not update task reminders: ${error.message}`);
+  } finally {
+    taskReminderButtonEl.disabled = false;
+  }
+});
+
 function errorMessage(data) {
   const detail = data && data.detail;
   if (typeof detail === "string") return detail;
@@ -304,6 +409,7 @@ authFormEl.addEventListener("submit", async (e) => {
     setAuthMode("login");
     showChat();
     setCurrentUser(name);
+    await syncTaskReminderSettings();
     connectWebSocket();
     await loadConversations();
   } catch {
@@ -335,6 +441,7 @@ async function checkSession() {
       clearUserState();
       setCurrentUser(me.data.username);
       showChat();
+      await syncTaskReminderSettings();
       connectWebSocket();
       await loadConversations();
     } else if (me.status === 401) {

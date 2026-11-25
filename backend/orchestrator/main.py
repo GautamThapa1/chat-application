@@ -18,7 +18,7 @@ from slowapi.util import get_remote_address
 
 
 from backend.generated import chat_pb2_grpc
-from backend.orchestrator import auth, conversations, memories, notes
+from backend.orchestrator import auth, conversations, memories, notes, reminders
 from backend.orchestrator.grpc_session import SessionStub
 from backend.orchestrator.rate_limit import default_limit_retry_after, limiter
 from backend.orchestrator.websocket import websocket_endpoint
@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI): # lifespan: manages the gRPC object and channe
 
 
 app = FastAPI(title="chat-orchestrator", lifespan=lifespan)
+app.state.vapid_public_key = os.getenv("VAPID_PUBLIC_KEY", "")
 
 app.state.limiter = limiter
 app.add_exception_handler(
@@ -103,6 +104,7 @@ app.include_router(auth.router)  # must come BEFORE the "/" static mount
 app.include_router(conversations.router)
 app.include_router(memories.router)
 app.include_router(notes.router)
+app.include_router(reminders.router)
 
 # connect the frontend
 app.mount(

@@ -10,7 +10,10 @@ import sqlite3
 import struct
 import tempfile
 import time
+from datetime import date, datetime, time as datetime_time, timezone as dt_timezone
 from pathlib import Path
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import sqlcipher3
 from dotenv import load_dotenv
@@ -320,9 +323,14 @@ def init_db():
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
                     username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
                     password_hash TEXT NOT NULL,
+                    timezone      TEXT NOT NULL DEFAULT 'UTC',
                     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            if "timezone" not in _table_columns(conn, "users"):
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'"
+                )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     token_hash TEXT PRIMARY KEY,
@@ -456,11 +464,53 @@ def init_db():
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     title      TEXT NOT NULL,
+                    due_at_utc INTEGER,
+                    timezone   TEXT NOT NULL DEFAULT 'UTC',
                     due_date   TEXT,
                     completed  INTEGER NOT NULL DEFAULT 0,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            task_columns = _table_columns(conn, "tasks")
+            if "due_at_utc" not in task_columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN due_at_utc INTEGER")
+            if "timezone" not in task_columns:
+                conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'"
+                )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS task_reminders (
+                    task_id         INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    scheduled_at    INTEGER NOT NULL,
+                    status          TEXT NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending', 'sending', 'sent', 'expired', 'cancelled')),
+                    attempts        INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                    lease_owner     TEXT,
+                    lease_until     INTEGER NOT NULL DEFAULT 0,
+                    last_error      TEXT,
+                    sent_at         INTEGER
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS push_subscriptions (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    endpoint   TEXT NOT NULL UNIQUE,
+                    p256dh     TEXT NOT NULL,
+                    auth       TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_reminders_due "
+                "ON task_reminders(status, next_attempt_at, scheduled_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user "
+                "ON push_subscriptions(user_id)"
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conversations_user_updated "
                 "ON conversations(user_id, updated_at DESC, conversation_id DESC)"
@@ -1901,16 +1951,152 @@ def clear_notes_idempotent(
 # --------------------------------------------------------------------------- #
 # Tasks
 # --------------------------------------------------------------------------- #
-def create_task(user_id: int, title: str, due_date: str | None = None) -> int:
-    """Insert a task and return its id. `due_date` is a free-form string (e.g. '2026-12-01')."""
+def _timezone_info(timezone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, TypeError) as exc:
+        raise ValueError("Timezone must be a valid IANA timezone.") from exc
+
+
+def _parse_due_at(due_at_local: str, timezone_name: str) -> int:
+    if not isinstance(due_at_local, str) or not due_at_local.strip():
+        raise ValueError("Deadline must be an ISO 8601 date or datetime.")
+    value = due_at_local.strip()
+    zone = _timezone_info(timezone_name)
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            local = datetime.combine(
+                date.fromisoformat(value), datetime_time(hour=9)
+            )
+        else:
+            local = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            "Deadline must use ISO 8601, such as 2026-12-01 or "
+            "2026-12-01T09:00."
+        ) from exc
+
+    if local.tzinfo is None:
+        localized = local.replace(tzinfo=zone)
+        round_trip = (
+            localized.astimezone(dt_timezone.utc)
+            .astimezone(zone)
+            .replace(tzinfo=None)
+        )
+        if round_trip != local:
+            raise ValueError("Deadline falls in a nonexistent local time.")
+    else:
+        localized = local
+    return int(localized.astimezone(dt_timezone.utc).timestamp())
+
+
+def _format_due_at(due_at_utc: int | None) -> str:
+    if due_at_utc is None:
+        return ""
+    return (
+        datetime.fromtimestamp(due_at_utc, dt_timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _schedule_task_reminder(
+    conn,
+    task_id: int,
+    user_id: int,
+    due_at_utc: int | None,
+) -> None:
+    if due_at_utc is None:
+        conn.execute("DELETE FROM task_reminders WHERE task_id = ?", (task_id,))
+        return
+    scheduled_at = due_at_utc - 15 * 60
+    existing = conn.execute(
+        "SELECT scheduled_at FROM task_reminders WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if existing is not None and existing["scheduled_at"] == scheduled_at:
+        return
+    status = "pending" if due_at_utc > int(time.time()) else "expired"
+    conn.execute(
+        """INSERT INTO task_reminders
+               (task_id, user_id, scheduled_at, status, next_attempt_at,
+                attempts, lease_owner, lease_until, last_error, sent_at)
+           VALUES (?, ?, ?, ?, 0, 0, NULL, 0, NULL, NULL)
+           ON CONFLICT(task_id) DO UPDATE SET
+               user_id = excluded.user_id,
+               scheduled_at = excluded.scheduled_at,
+               status = excluded.status,
+               next_attempt_at = 0,
+               attempts = 0,
+               lease_owner = NULL,
+               lease_until = 0,
+               last_error = NULL,
+               sent_at = NULL""",
+        (task_id, user_id, scheduled_at, status),
+    )
+
+
+def set_user_timezone(user_id: int, timezone_name: str) -> bool:
+    _timezone_info(timezone_name)
     conn = get_connection()
     try:
         with conn:
-            cur = conn.execute(
-                "INSERT INTO tasks (user_id, title, due_date) VALUES (?, ?, ?)",
-                (user_id, title, due_date),
+            updated = conn.execute(
+                "UPDATE users SET timezone = ? WHERE id = ?",
+                (timezone_name, user_id),
             )
-            return cur.lastrowid
+            if not updated.rowcount:
+                return False
+            legacy_tasks = conn.execute(
+                """SELECT id, due_date, completed
+                     FROM tasks
+                    WHERE user_id = ? AND due_at_utc IS NULL
+                      AND due_date IS NOT NULL""",
+                (user_id,),
+            ).fetchall()
+            for task in legacy_tasks:
+                value = task["due_date"]
+                if not value or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    continue
+                try:
+                    due_at_utc = _parse_due_at(value, timezone_name)
+                except ValueError:
+                    continue
+                conn.execute(
+                    """UPDATE tasks
+                          SET due_at_utc = ?, timezone = ?, due_date = NULL
+                        WHERE id = ? AND user_id = ?""",
+                    (due_at_utc, timezone_name, task["id"], user_id),
+                )
+                if not task["completed"]:
+                    _schedule_task_reminder(
+                        conn, task["id"], user_id, due_at_utc
+                    )
+            return True
+    finally:
+        conn.close()
+
+
+def _task_from_row(row) -> dict:
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "due_at_utc": _format_due_at(row["due_at_utc"]),
+        "timezone": row["timezone"] or "UTC",
+        "legacy_due_date": row["due_date"] or "",
+        "completed": bool(row["completed"]),
+        "created_at": row["created_at"],
+    }
+
+
+def create_task(user_id: int, title: str, due_at_local: str = "") -> int:
+    """Create a task and queue its deadline reminder, if it has a deadline."""
+    conn = get_connection()
+    try:
+        with conn:
+            return create_task_in_transaction(
+                conn, user_id, title, due_at_local
+            )["id"]
     finally:
         conn.close()
 
@@ -1918,16 +2104,16 @@ def create_task(user_id: int, title: str, due_date: str | None = None) -> int:
 def create_task_idempotent(
     user_id: int,
     title: str,
-    due_date: str | None,
+    due_at_local: str,
     idempotency_key: str,
 ) -> dict:
     return run_idempotent_request(
         user_id,
         idempotency_key,
         "create_task",
-        {"title": title, "due_date": due_date or ""},
+        {"title": title, "due_at_local": due_at_local},
         lambda conn: create_task_in_transaction(
-            conn, user_id, title, due_date
+            conn, user_id, title, due_at_local
         ),
     )
 
@@ -1936,28 +2122,104 @@ def create_task_in_transaction(
     conn,
     user_id: int,
     title: str,
-    due_date: str | None,
+    due_at_local: str,
 ) -> dict:
     if conn is None:
-        task_id = create_task(user_id, title, due_date)
+        task_id = create_task(user_id, title, due_at_local)
         return {
             "id": task_id,
             "title": title,
-            "due_date": due_date or "",
+            "due_at_utc": "",
+            "timezone": "UTC",
+            "legacy_due_date": "",
             "completed": False,
             "created_at": "",
         }
-    cur = conn.execute(
-        "INSERT INTO tasks (user_id, title, due_date) VALUES (?, ?, ?)",
-        (user_id, title, due_date),
+    user = conn.execute(
+        "SELECT timezone FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+    if user is None:
+        raise ValueError("User does not exist.")
+    timezone_name = user["timezone"] or "UTC"
+    due_at_utc = (
+        _parse_due_at(due_at_local, timezone_name) if due_at_local else None
     )
-    return {
-        "id": cur.lastrowid,
-        "title": title,
-        "due_date": due_date or "",
-        "completed": False,
-        "created_at": "",
-    }
+    cur = conn.execute(
+        """INSERT INTO tasks (user_id, title, due_at_utc, timezone)
+           VALUES (?, ?, ?, ?)""",
+        (user_id, title, due_at_utc, timezone_name),
+    )
+    task_id = cur.lastrowid
+    _schedule_task_reminder(conn, task_id, user_id, due_at_utc)
+    row = conn.execute(
+        "SELECT * FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    return _task_from_row(row)
+
+
+def update_task_deadline_in_transaction(
+    conn, user_id: int, task_id: int, due_at_local: str
+) -> dict:
+    if conn is None:
+        return update_task_deadline(user_id, task_id, due_at_local)
+    task = conn.execute(
+        "SELECT completed FROM tasks WHERE id = ? AND user_id = ?",
+        (task_id, user_id),
+    ).fetchone()
+    if task is None:
+        return {"found": False}
+    user = conn.execute(
+        "SELECT timezone FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+    timezone_name = user["timezone"] or "UTC"
+    due_at_utc = (
+        _parse_due_at(due_at_local, timezone_name) if due_at_local else None
+    )
+    conn.execute(
+        """UPDATE tasks
+              SET due_at_utc = ?, timezone = ?, due_date = NULL
+            WHERE id = ? AND user_id = ?""",
+        (due_at_utc, timezone_name, task_id, user_id),
+    )
+    _schedule_task_reminder(
+        conn,
+        task_id,
+        user_id,
+        None if task["completed"] else due_at_utc,
+    )
+    row = conn.execute(
+        "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
+        (task_id, user_id),
+    ).fetchone()
+    return {"found": True, **_task_from_row(row)}
+
+
+def update_task_deadline(user_id: int, task_id: int, due_at_local: str) -> dict:
+    conn = get_connection()
+    try:
+        with conn:
+            return update_task_deadline_in_transaction(
+                conn, user_id, task_id, due_at_local
+            )
+    finally:
+        conn.close()
+
+
+def update_task_deadline_idempotent(
+    user_id: int,
+    task_id: int,
+    due_at_local: str,
+    idempotency_key: str,
+) -> dict:
+    return run_idempotent_request(
+        user_id,
+        idempotency_key,
+        "update_task",
+        {"task_id": task_id, "due_at_local": due_at_local},
+        lambda conn: update_task_deadline_in_transaction(
+            conn, user_id, task_id, due_at_local
+        ),
+    )
 
 
 def get_tasks(user_id: int) -> list[dict]:
@@ -1965,13 +2227,14 @@ def get_tasks(user_id: int) -> list[dict]:
     conn = get_connection()
     try:
         rows = conn.execute(
-            """SELECT id, title, due_date, completed, created_at
+            """SELECT id, title, due_at_utc, timezone, due_date,
+                      completed, created_at
                  FROM tasks
                 WHERE user_id = ?
                 ORDER BY completed ASC, id ASC""",
             (user_id,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_task_from_row(row) for row in rows]
     finally:
         conn.close()
 
@@ -1985,6 +2248,14 @@ def complete_task(user_id: int, task_id: int) -> bool:
                 "UPDATE tasks SET completed = 1 WHERE id = ? AND user_id = ?",
                 (task_id, user_id),
             )
+            if cur.rowcount:
+                conn.execute(
+                    """UPDATE task_reminders
+                          SET status = 'cancelled', lease_owner = NULL,
+                              lease_until = 0
+                        WHERE task_id = ? AND status IN ('pending', 'sending')""",
+                    (task_id,),
+                )
             return cur.rowcount > 0
     finally:
         conn.close()
@@ -1998,13 +2269,19 @@ def complete_task_idempotent(
     def execute(conn) -> dict:
         if conn is None:
             return {"success": complete_task(user_id, task_id)}
-        return {
-            "success": conn.execute(
-                "UPDATE tasks SET completed = 1 WHERE id = ? AND user_id = ?",
-                (task_id, user_id),
-            ).rowcount
-            > 0
-        }
+        updated = conn.execute(
+            "UPDATE tasks SET completed = 1 WHERE id = ? AND user_id = ?",
+            (task_id, user_id),
+        )
+        if updated.rowcount:
+            conn.execute(
+                """UPDATE task_reminders
+                      SET status = 'cancelled', lease_owner = NULL,
+                          lease_until = 0
+                    WHERE task_id = ? AND status IN ('pending', 'sending')""",
+                (task_id,),
+            )
+        return {"success": updated.rowcount > 0}
 
     return run_idempotent_request(
         user_id,
@@ -2019,6 +2296,10 @@ def delete_task(user_id: int, task_id: int) -> bool:
     conn = get_connection()
     try:
         with conn:
+            conn.execute(
+                "DELETE FROM task_reminders WHERE task_id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
             cur = conn.execute(
                 "DELETE FROM tasks WHERE id = ? AND user_id = ?",
                 (task_id, user_id),
@@ -2036,6 +2317,10 @@ def delete_task_idempotent(
     def execute(conn) -> dict:
         if conn is None:
             return {"success": delete_task(user_id, task_id)}
+        conn.execute(
+            "DELETE FROM task_reminders WHERE task_id = ? AND user_id = ?",
+            (task_id, user_id),
+        )
         return {
             "success": conn.execute(
                 "DELETE FROM tasks WHERE id = ? AND user_id = ?",
@@ -2058,6 +2343,9 @@ def clear_tasks(user_id: int) -> int:
     conn = get_connection()
     try:
         with conn:
+            conn.execute(
+                "DELETE FROM task_reminders WHERE user_id = ?", (user_id,)
+            )
             return conn.execute(
                 "DELETE FROM tasks WHERE user_id = ?", (user_id,)
             ).rowcount
@@ -2070,6 +2358,9 @@ def clear_tasks_idempotent(user_id: int, idempotency_key: str) -> dict:
     def execute(conn) -> dict:
         if conn is None:
             return {"deleted_count": clear_tasks(user_id)}
+        conn.execute(
+            "DELETE FROM task_reminders WHERE user_id = ?", (user_id,)
+        )
         return {
             "deleted_count": conn.execute(
                 "DELETE FROM tasks WHERE user_id = ?", (user_id,)
@@ -2079,6 +2370,242 @@ def clear_tasks_idempotent(user_id: int, idempotency_key: str) -> dict:
     return run_idempotent_request(
         user_id, idempotency_key, "clear_tasks", {}, execute,
     )
+
+
+def save_push_subscription(
+    user_id: int, endpoint: str, p256dh: str, auth: str
+) -> None:
+    parsed = urlsplit(endpoint)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    allowed_host = (
+        hostname == "fcm.googleapis.com"
+        or hostname.endswith(".fcm.googleapis.com")
+        or hostname == "push.services.mozilla.com"
+        or hostname.endswith(".push.services.mozilla.com")
+        or hostname == "web.push.apple.com"
+        or hostname.endswith(".notify.windows.com")
+    )
+    try:
+        valid_port = parsed.port in (None, 443)
+    except ValueError:
+        valid_port = False
+    if (
+        parsed.scheme != "https"
+        or not allowed_host
+        or not valid_port
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.path
+    ):
+        raise ValueError("Push endpoint must be a supported HTTPS push service.")
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute(
+                """INSERT INTO push_subscriptions
+                       (user_id, endpoint, p256dh, auth)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(endpoint) DO UPDATE SET
+                       user_id = excluded.user_id,
+                       p256dh = excluded.p256dh,
+                       auth = excluded.auth""",
+                (user_id, endpoint, p256dh, auth),
+            )
+    finally:
+        conn.close()
+
+
+def get_push_subscriptions(user_id: int) -> list[dict]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """SELECT endpoint, p256dh, auth
+                 FROM push_subscriptions
+                WHERE user_id = ?""",
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def delete_push_subscription(user_id: int, endpoint: str) -> bool:
+    conn = get_connection()
+    try:
+        with conn:
+            deleted = conn.execute(
+                "DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?",
+                (user_id, endpoint),
+            )
+            return deleted.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_push_subscription_by_endpoint(user_id: int, endpoint: str) -> bool:
+    conn = get_connection()
+    try:
+        with conn:
+            deleted = conn.execute(
+                "DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?",
+                (user_id, endpoint),
+            )
+            return deleted.rowcount > 0
+    finally:
+        conn.close()
+
+
+def claim_due_task_reminders(
+    limit: int = 20,
+    lease_owner: str = "",
+) -> list[dict]:
+    if not 1 <= limit <= 100:
+        raise ValueError("Reminder batch size must be between 1 and 100.")
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = int(time.time())
+            conn.execute(
+                """UPDATE task_reminders
+                      SET status = CASE
+                              WHEN EXISTS (
+                                  SELECT 1 FROM tasks
+                                   WHERE tasks.id = task_reminders.task_id
+                                     AND tasks.completed = 1
+                              ) THEN 'cancelled'
+                              ELSE 'expired'
+                          END,
+                          lease_owner = NULL, lease_until = 0
+                    WHERE status IN ('pending', 'sending')
+                      AND EXISTS (
+                          SELECT 1 FROM tasks
+                           WHERE tasks.id = task_reminders.task_id
+                             AND (tasks.completed = 1 OR tasks.due_at_utc <= ?)
+                      )""",
+                (now,),
+            )
+            conn.execute(
+                """UPDATE task_reminders
+                      SET status = 'pending', lease_owner = NULL, lease_until = 0
+                    WHERE status = 'sending' AND lease_until <= ?
+                      AND EXISTS (
+                          SELECT 1 FROM tasks
+                           WHERE tasks.id = task_reminders.task_id
+                             AND tasks.completed = 0
+                             AND tasks.due_at_utc > ?
+                      )""",
+                (now, now),
+            )
+            rows = conn.execute(
+                """SELECT r.task_id, r.user_id, r.scheduled_at, t.title,
+                          t.due_at_utc, t.timezone
+                     FROM task_reminders AS r
+                     JOIN tasks AS t
+                       ON t.id = r.task_id AND t.user_id = r.user_id
+                    WHERE r.status = 'pending'
+                      AND r.scheduled_at <= ?
+                      AND r.next_attempt_at <= ?
+                      AND t.completed = 0
+                      AND t.due_at_utc > ?
+                    ORDER BY r.scheduled_at, r.task_id
+                    LIMIT ?""",
+                (now, now, now, limit),
+            ).fetchall()
+            if lease_owner:
+                conn.executemany(
+                    """UPDATE task_reminders
+                          SET status = 'sending', lease_owner = ?, lease_until = ?
+                        WHERE task_id = ? AND status = 'pending'""",
+                    [
+                        (lease_owner, now + 120, row["task_id"])
+                        for row in rows
+                    ],
+                )
+            return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def mark_task_reminder_sent(task_id: int, lease_owner: str) -> bool:
+    conn = get_connection()
+    try:
+        with conn:
+            updated = conn.execute(
+                """UPDATE task_reminders
+                      SET status = 'sent', sent_at = ?, lease_owner = NULL,
+                          lease_until = 0, last_error = NULL
+                    WHERE task_id = ? AND status = 'sending'
+                      AND lease_owner = ?""",
+                (int(time.time()), task_id, lease_owner),
+            )
+            return updated.rowcount > 0
+    finally:
+        conn.close()
+
+
+def task_reminder_is_sendable(task_id: int, lease_owner: str) -> bool:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """SELECT t.due_at_utc, t.completed
+                 FROM task_reminders AS r
+                 JOIN tasks AS t ON t.id = r.task_id
+                WHERE r.task_id = ? AND r.status = 'sending'
+                  AND r.lease_owner = ?""",
+            (task_id, lease_owner),
+        ).fetchone()
+        return bool(
+            row
+            and not row["completed"]
+            and row["due_at_utc"] > int(time.time())
+        )
+    finally:
+        conn.close()
+
+
+def record_task_reminder_failure(
+    task_id: int, lease_owner: str, error: str
+) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            now = int(time.time())
+            row = conn.execute(
+                """SELECT r.attempts, t.due_at_utc, t.completed
+                     FROM task_reminders AS r
+                     JOIN tasks AS t ON t.id = r.task_id
+                    WHERE r.task_id = ? AND r.lease_owner = ?
+                      AND r.status = 'sending'""",
+                (task_id, lease_owner),
+            ).fetchone()
+            if row is None:
+                return
+            status = (
+                "cancelled"
+                if row["completed"]
+                else "expired"
+                if row["due_at_utc"] <= now
+                else "pending"
+            )
+            attempts = row["attempts"] + 1
+            retry_delay = min(300, 2 ** min(attempts, 8))
+            conn.execute(
+                """UPDATE task_reminders
+                      SET status = ?, attempts = ?, next_attempt_at = ?,
+                          last_error = ?, lease_owner = NULL, lease_until = 0
+                    WHERE task_id = ? AND lease_owner = ?""",
+                (
+                    status,
+                    attempts,
+                    now + retry_delay,
+                    error[:500],
+                    task_id,
+                    lease_owner,
+                ),
+            )
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------- #

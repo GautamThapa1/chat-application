@@ -155,9 +155,11 @@ message Memory {
 message Task {
   int64  id         = 1;
   string title      = 2;
-  string due_date   = 3;
+  string due_at_utc = 3;
   bool   completed  = 4;
   string created_at = 5;
+  string timezone   = 6;
+  string legacy_due_date = 7;
 }
 
 // =========================================================================== #
@@ -298,12 +300,22 @@ message UpsertMemoryEmbeddingResponse {
 // Tasks request/response
 // =========================================================================== #
 message CreateTaskRequest {
-  string title    = 1;
-  string due_date = 2;  // "" when unset
+  string title        = 1;
+  string due_at_local = 2;  // ISO local datetime or date; date defaults to 9 AM
   string idempotency_key = 3;
 }
 
 message CreateTaskResponse {
+  Task task = 1;
+}
+
+message UpdateTaskRequest {
+  int64 task_id = 1;
+  string due_at_local = 2;  // "" clears the deadline
+  string idempotency_key = 3;
+}
+
+message UpdateTaskResponse {
   Task task = 1;
 }
 
@@ -338,6 +350,26 @@ message ClearTasksRequest {
 message ClearTasksResponse {
   int64 deleted_count = 1;
 }
+
+message SetUserTimezoneRequest {
+  string timezone = 1;
+}
+
+message SetUserTimezoneResponse {}
+
+message SavePushSubscriptionRequest {
+  string endpoint = 1;
+  string p256dh = 2;
+  string auth = 3;
+}
+
+message SavePushSubscriptionResponse {}
+
+message DeletePushSubscriptionRequest {
+  string endpoint = 1;
+}
+
+message DeletePushSubscriptionResponse {}
 
 // =========================================================================== #
 // Auth request/response
@@ -411,8 +443,12 @@ service ChatService {
   rpc SearchMemoriesHybrid(SearchMemoriesHybridRequest) returns (SearchMemoriesResponse);
   rpc UpsertMemoryEmbedding(UpsertMemoryEmbeddingRequest) returns (UpsertMemoryEmbeddingResponse);
   rpc CreateTask(CreateTaskRequest)     returns (CreateTaskResponse);
+  rpc UpdateTask(UpdateTaskRequest)     returns (UpdateTaskResponse);
   rpc ListTasks(ListTasksRequest)       returns (ListTasksResponse);
   rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
   rpc DeleteTask(DeleteTaskRequest)     returns (DeleteTaskResponse);
   rpc ClearTasks(ClearTasksRequest)     returns (ClearTasksResponse);
+  rpc SetUserTimezone(SetUserTimezoneRequest) returns (SetUserTimezoneResponse);
+  rpc SavePushSubscription(SavePushSubscriptionRequest) returns (SavePushSubscriptionResponse);
+  rpc DeletePushSubscription(DeletePushSubscriptionRequest) returns (DeletePushSubscriptionResponse);
 }

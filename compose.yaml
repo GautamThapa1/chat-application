@@ -2,7 +2,7 @@
 # Only Qdrant (for running the Python services directly on your machine):
 #               docker compose up -d qdrant
 #
-# Secrets come from a `.env` file next to this file (see .env.example).
+# Secrets come from a `.env` file next to this file (see README.md).
 
 services:
   qdrant:
@@ -27,6 +27,8 @@ services:
       QDRANT_COLLECTION_PREFIX: ${QDRANT_COLLECTION_PREFIX:-note_embeddings}
       QDRANT_CONVERSATION_COLLECTION_PREFIX: ${QDRANT_CONVERSATION_COLLECTION_PREFIX:-}
       QDRANT_URL: http://qdrant:6333
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@example.com}
       GRPC_BIND: 0.0.0.0   # reachable from the "app" container only (no ports: published)
       DB_PATH: /data/app.db
     volumes:
@@ -52,6 +54,7 @@ services:
       GRPC_TARGET: service:50051
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
     ports:
       - "8000:8000"
     depends_on:
