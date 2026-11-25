@@ -11,7 +11,8 @@ A modern AI-powered chat application built with **Python, FastAPI, and Google Ge
 - **Chat History** — Create, manage, delete, and semantically search conversations.
 - **Notes Management** — Save, search, and retrieve personal notes.
 - **Long-Term Memory** — Automatically retain useful, stable user context separately from notes, retrieve it when relevant, and undo a newly saved memory.
-- **Task Management** — Create, list, complete, and delete tasks; clearing all tasks requires explicit confirmation.
+- **Task Management** — Create, list, reschedule, complete, and delete tasks; clearing all tasks requires explicit confirmation.
+- **Task Reminders** — Optional Web Push reminders 15 minutes before task deadlines, including when the app is closed.
 - **Gemini Function Calling** — Execute note, memory, and task actions; clearing notes or tasks requires explicit confirmation.
 - **gRPC Communication** — Separate application logic from the backend service.
 - **SQLite Storage** — Persistent data storage.
@@ -70,7 +71,21 @@ GEMINI_MODEL=gemini-3.5-flash-lite
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 GEMINI_MAX_INPUT_TOKENS=24000
 DATABASE_KEY=your_long_random_database_key
+VAPID_PRIVATE_KEY="your VAPID private key in PEM format"
+VAPID_PUBLIC_KEY=your VAPID application server public key
+VAPID_SUBJECT=mailto:you@example.com
 ```
+
+Web Push requires HTTPS (localhost is allowed for development). Generate a
+VAPID key pair with `uv run vapid --gen`, then set the private PEM as
+`VAPID_PRIVATE_KEY` and the browser application-server key from
+`uv run vapid --applicationServerKey --private-key <private-key-file>` as
+`VAPID_PUBLIC_KEY`. Keep the private key secret and out of version control.
+After signing in, use **Enable task reminders** and allow browser notifications.
+The browser's timezone is saved with the account; date-only task deadlines use
+9:00 AM in that timezone. A reminder is scheduled for 15 minutes before the
+deadline, and its push-service TTL is limited to the remaining time before that
+deadline.
 
 Notes are indexed with Gemini embeddings. The gRPC service queues new and
 updated notes, backfills existing notes at startup, and retries failed
