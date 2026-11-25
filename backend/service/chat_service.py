@@ -18,6 +18,9 @@ class _ConversationMessageNotFound(LookupError):
     pass
 
 
+_CHAT_STREAM_ERROR_MESSAGE = "Something went wrong. Please try again."
+
+
 def _load_history_for_mode(
     request,
     user_id: int,
@@ -135,11 +138,11 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             context.abort(grpc.StatusCode.NOT_FOUND, str(exc))
         except ValueError as exc:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
-        except Exception as exc:
+        except Exception:
             logging.exception("StreamMessage failed before generation")
             yield chat_pb2.ChatEvent(
                 request_id=request.request_id,
-                error=chat_pb2.ChatError(message=str(exc)),
+                error=chat_pb2.ChatError(message=_CHAT_STREAM_ERROR_MESSAGE),
             )
             return
 
@@ -236,11 +239,11 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                 except Exception:
                     logging.exception("Could not save the partial response")
             raise
-        except Exception as exc:
+        except Exception:
             logging.exception("StreamMessage failed")
             yield chat_pb2.ChatEvent(
                 request_id=request.request_id,
-                error=chat_pb2.ChatError(message=str(exc)),
+                error=chat_pb2.ChatError(message=_CHAT_STREAM_ERROR_MESSAGE),
             )
 
     # ---------------------------------------------------------------- #

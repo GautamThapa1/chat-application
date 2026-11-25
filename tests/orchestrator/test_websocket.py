@@ -201,7 +201,7 @@ async def test_websocket_maps_stream_events_and_completed_suffix():
 
 
 @pytest.mark.asyncio
-async def test_in_band_stream_error_is_forwarded_after_partial_text():
+async def test_in_band_stream_error_is_redacted_after_partial_text(caplog):
     stub = FakeStub(lambda request: events(
         started(), chunk("partial", 0), chat_error("generation failed")
     ))
@@ -214,12 +214,13 @@ async def test_in_band_stream_error_is_forwarded_after_partial_text():
         "start", "chunk", "error",
     ]
     assert websocket.sent_messages[-1]["error"] == (
-        "Message failed: generation failed"
+        "Something went wrong. Please try again."
     )
+    assert "generation failed" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_grpc_stream_error_uses_rpc_details():
+async def test_grpc_stream_error_redacts_rpc_details(caplog):
     failure = grpc.aio.AioRpcError(
         grpc.StatusCode.NOT_FOUND,
         grpc.aio.Metadata(),
@@ -241,8 +242,9 @@ async def test_grpc_stream_error_uses_rpc_details():
         "start", "error",
     ]
     assert websocket.sent_messages[-1]["error"] == (
-        "Message failed: Conversation not found."
+        "Something went wrong. Please try again."
     )
+    assert "Conversation not found." not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -254,7 +256,30 @@ async def test_stream_without_terminal_event_reports_error():
     await wait_until(lambda: hub.get(1, 3) is None)
 
     assert websocket.sent_messages[-1]["type"] == "error"
-    assert "without a terminal event" in websocket.sent_messages[-1]["error"]
+    assert websocket.sent_messages[-1]["error"] == (
+        "Something went wrong. Please try again."
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        (
+            grpc.StatusCode.UNAVAILABLE,
+            "The assistant is temporarily unavailable. Please try again.",
+        ),
+        (
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            "The assistant is busy right now. Please try again shortly.",
+        ),
+        (
+            grpc.StatusCode.INTERNAL,
+            "Something went wrong. Please try again.",
+        ),
+    ],
+)
+def test_grpc_status_uses_a_friendly_error_message(code, message):
+    assert websocket_module._friendly_grpc_error(code) == message
 
 
 @pytest.mark.asyncio

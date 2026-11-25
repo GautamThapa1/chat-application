@@ -233,7 +233,8 @@ def test_invalid_api_key_is_reported_as_an_in_band_grpc_error(grpc_runtime):
         "started",
         "error",
     ]
-    assert "API key not valid" in events[-1].error.message
+    assert events[-1].error.message == "Something went wrong. Please try again."
+    assert "API key not valid" not in events[-1].error.message
 
 
 def test_real_grpc_edit_updates_message_and_discards_later_turns(grpc_runtime):

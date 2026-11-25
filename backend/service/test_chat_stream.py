@@ -172,7 +172,30 @@ def test_stream_message_aborts_before_started_for_missing_conversation(chat_setu
     assert error.value.code == grpc.StatusCode.NOT_FOUND
 
 
-def test_stream_message_reports_generation_errors_in_band(chat_setup):
+def test_stream_message_redacts_pre_generation_errors(
+    chat_setup, monkeypatch, caplog
+):
+    _, token, conversation_id, handler_for = chat_setup
+
+    def fail_history_load(*args):
+        raise RuntimeError("private database detail")
+
+    monkeypatch.setattr(db, "get_conversation", fail_history_load)
+    handler = handler_for(_GeminiClient([]))
+    events = list(
+        handler.unary_stream(
+            _request(conversation_id, mode="message"),
+            _Context(token),
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].WhichOneof("payload") == "error"
+    assert events[0].error.message == "Something went wrong. Please try again."
+    assert "private database detail" in caplog.text
+
+
+def test_stream_message_reports_generation_errors_in_band(chat_setup, caplog):
     _, token, conversation_id, handler_for = chat_setup
     client = _GeminiClient(
         [_chunk("Partial text")],
@@ -192,7 +215,8 @@ def test_stream_message_reports_generation_errors_in_band(chat_setup):
         "chunk",
         "error",
     ]
-    assert events[-1].error.message == "model unavailable"
+    assert events[-1].error.message == "Something went wrong. Please try again."
+    assert "model unavailable" in caplog.text
 
 
 def test_stream_message_serializes_tool_results_with_sequential_indexes(

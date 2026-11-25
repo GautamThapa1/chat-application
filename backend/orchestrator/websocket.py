@@ -28,6 +28,15 @@ from backend.generated import chat_pb2
 from backend.orchestrator.rate_limit import message_limit_retry_after
 
 log = logging.getLogger("orchestrator")
+_GENERIC_CHAT_ERROR = "Something went wrong. Please try again."
+
+
+def _friendly_grpc_error(code: grpc.StatusCode) -> str:
+    if code == grpc.StatusCode.UNAVAILABLE:
+        return "The assistant is temporarily unavailable. Please try again."
+    if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
+        return "The assistant is busy right now. Please try again shortly."
+    return _GENERIC_CHAT_ERROR
 
 
 def bad_id(value) -> bool:
@@ -234,10 +243,11 @@ async def _run_generation(
                     terminal = ("cancelled", {})
                     saw_terminal = True
                 elif payload == "error":
-                    terminal = (
-                        "error",
-                        {"error": f"Message failed: {event.error.message}"},
+                    log.error(
+                        "ChatService reported an error for request %s",
+                        request_id,
                     )
+                    terminal = ("error", {"error": _GENERIC_CHAT_ERROR})
                     saw_terminal = True
                 else:
                     raise ValueError("Chat stream returned an unknown event.")
@@ -245,7 +255,8 @@ async def _run_generation(
             stream.cancel()
             raise
         except grpc.aio.AioRpcError as exc:
-            terminal = ("error", {"error": f"Message failed: {exc.details()}"})
+            log.error("gRPC stream failed: %s", exc.code())
+            terminal = ("error", {"error": _friendly_grpc_error(exc.code())})
             saw_terminal = True
 
         if not saw_terminal:
@@ -255,9 +266,9 @@ async def _run_generation(
         cancelled = True
         terminal = ("cancelled", {})
 
-    except Exception as exc:
+    except Exception:
         log.exception("Failed to process chat message")
-        terminal = ("error", {"error": f"Message failed: {exc}"})
+        terminal = ("error", {"error": _GENERIC_CHAT_ERROR})
 
     finally:
         # Free the conversation first, so a client that reacts to the final
