@@ -182,6 +182,11 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.CreateTaskRequest.SerializeToString,
                 response_deserializer=chat__pb2.CreateTaskResponse.FromString,
                 _registered_method=True)
+        self.UpdateTask = channel.unary_unary(
+                '/chat.ChatService/UpdateTask',
+                request_serializer=chat__pb2.UpdateTaskRequest.SerializeToString,
+                response_deserializer=chat__pb2.UpdateTaskResponse.FromString,
+                _registered_method=True)
         self.ListTasks = channel.unary_unary(
                 '/chat.ChatService/ListTasks',
                 request_serializer=chat__pb2.ListTasksRequest.SerializeToString,
@@ -201,6 +206,21 @@ class ChatServiceStub:
                 '/chat.ChatService/ClearTasks',
                 request_serializer=chat__pb2.ClearTasksRequest.SerializeToString,
                 response_deserializer=chat__pb2.ClearTasksResponse.FromString,
+                _registered_method=True)
+        self.SetUserTimezone = channel.unary_unary(
+                '/chat.ChatService/SetUserTimezone',
+                request_serializer=chat__pb2.SetUserTimezoneRequest.SerializeToString,
+                response_deserializer=chat__pb2.SetUserTimezoneResponse.FromString,
+                _registered_method=True)
+        self.SavePushSubscription = channel.unary_unary(
+                '/chat.ChatService/SavePushSubscription',
+                request_serializer=chat__pb2.SavePushSubscriptionRequest.SerializeToString,
+                response_deserializer=chat__pb2.SavePushSubscriptionResponse.FromString,
+                _registered_method=True)
+        self.DeletePushSubscription = channel.unary_unary(
+                '/chat.ChatService/DeletePushSubscription',
+                request_serializer=chat__pb2.DeletePushSubscriptionRequest.SerializeToString,
+                response_deserializer=chat__pb2.DeletePushSubscriptionResponse.FromString,
                 _registered_method=True)
 
 
@@ -384,6 +404,12 @@ class ChatServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def UpdateTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ListTasks(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -403,6 +429,24 @@ class ChatServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def ClearTasks(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetUserTimezone(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SavePushSubscription(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeletePushSubscription(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -556,6 +600,11 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     request_deserializer=chat__pb2.CreateTaskRequest.FromString,
                     response_serializer=chat__pb2.CreateTaskResponse.SerializeToString,
             ),
+            'UpdateTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateTask,
+                    request_deserializer=chat__pb2.UpdateTaskRequest.FromString,
+                    response_serializer=chat__pb2.UpdateTaskResponse.SerializeToString,
+            ),
             'ListTasks': grpc.unary_unary_rpc_method_handler(
                     servicer.ListTasks,
                     request_deserializer=chat__pb2.ListTasksRequest.FromString,
@@ -575,6 +624,21 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     servicer.ClearTasks,
                     request_deserializer=chat__pb2.ClearTasksRequest.FromString,
                     response_serializer=chat__pb2.ClearTasksResponse.SerializeToString,
+            ),
+            'SetUserTimezone': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetUserTimezone,
+                    request_deserializer=chat__pb2.SetUserTimezoneRequest.FromString,
+                    response_serializer=chat__pb2.SetUserTimezoneResponse.SerializeToString,
+            ),
+            'SavePushSubscription': grpc.unary_unary_rpc_method_handler(
+                    servicer.SavePushSubscription,
+                    request_deserializer=chat__pb2.SavePushSubscriptionRequest.FromString,
+                    response_serializer=chat__pb2.SavePushSubscriptionResponse.SerializeToString,
+            ),
+            'DeletePushSubscription': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeletePushSubscription,
+                    request_deserializer=chat__pb2.DeletePushSubscriptionRequest.FromString,
+                    response_serializer=chat__pb2.DeletePushSubscriptionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1374,6 +1438,33 @@ class ChatService:
             _registered_method=True)
 
     @staticmethod
+    def UpdateTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/UpdateTask',
+            chat__pb2.UpdateTaskRequest.SerializeToString,
+            chat__pb2.UpdateTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def ListTasks(request,
             target,
             options=(),
@@ -1471,6 +1562,87 @@ class ChatService:
             '/chat.ChatService/ClearTasks',
             chat__pb2.ClearTasksRequest.SerializeToString,
             chat__pb2.ClearTasksResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetUserTimezone(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/SetUserTimezone',
+            chat__pb2.SetUserTimezoneRequest.SerializeToString,
+            chat__pb2.SetUserTimezoneResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SavePushSubscription(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/SavePushSubscription',
+            chat__pb2.SavePushSubscriptionRequest.SerializeToString,
+            chat__pb2.SavePushSubscriptionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeletePushSubscription(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/chat.ChatService/DeletePushSubscription',
+            chat__pb2.DeletePushSubscriptionRequest.SerializeToString,
+            chat__pb2.DeletePushSubscriptionResponse.FromString,
             options,
             channel_credentials,
             insecure,
