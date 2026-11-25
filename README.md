@@ -154,6 +154,9 @@ cp .env.example .env        # then set GEMINI_API_KEY and DATABASE_KEY
 docker compose up --build
 ```
 
+Gemini configuration is provided to the gRPC service; the web app calls it
+over gRPC and does not receive the Gemini API key.
+
 Open [http://localhost:8000](http://localhost:8000).
 
 - The SQLite database lives in the `app_data` volume and Qdrant vectors in

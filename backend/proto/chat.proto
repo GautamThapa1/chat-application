@@ -16,6 +16,52 @@ message ChatResponse {
   string content = 2;
 }
 
+# frontend sends one request
+message ChatTurnRequest {
+  int64  conversation_id      = 1;
+  string message              = 2;
+  string request_id           = 3;
+  string mode                 = 4;
+  int64  message_id           = 5;
+  int64  assistant_message_id = 6;
+}
+
+message Started {}
+
+message TextChunk {
+  string content = 1;
+  int32 offset = 2;
+}
+
+message ToolResult {
+  int32 index = 1;
+  string tool = 2;
+  string result_json = 3;
+}
+
+message Completed {
+  string full_text = 1;
+}
+
+message Cancelled {}
+
+message ChatError {
+  string message = 1;
+}
+
+# sends multiple chat response but oneof a kind
+message ChatEvent {
+  string request_id = 1;
+  oneof payload {
+    Started started = 2;
+    TextChunk chunk = 3;
+    ToolResult tool_result = 4;
+    Completed completed = 5;
+    Cancelled cancelled = 6;
+    ChatError error = 7;
+  }
+}
+
 message SaveConversationRequest {
   string user_content      = 1;
   string assistant_content = 2;
@@ -418,6 +464,7 @@ message ValidateSessionResponse {
 // =========================================================================== #
 service ChatService {
   rpc SendMessage(ChatMessage) returns (ChatResponse);
+  rpc StreamMessage(ChatTurnRequest) returns (stream ChatEvent);
   rpc CreateConversation(CreateConversationRequest) returns (CreateConversationResponse);
   rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
   rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);

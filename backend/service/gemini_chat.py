@@ -1,23 +1,28 @@
-"""Gemini function tools and their authenticated gRPC dispatcher."""
+"""Synchronous Gemini chat generation and direct service-side tool dispatch."""
 
-import asyncio
-import contextlib
+import hashlib
 import logging
+import os
 import re
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Iterator
+from contextlib import closing
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from google.genai import types
 
-from backend.embeddings import QUERY_TASK_TYPE, embed_text_async, embedding_model
-from backend.generated import chat_pb2
-from backend.orchestrator.gemini_service import bounded_contents
-from datetime import datetime, timezone as dt_timezone
-from zoneinfo import ZoneInfo
+from backend.embeddings import QUERY_TASK_TYPE, embed_text, embedding_model
+from backend.service import db, memory_store
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_INPUT_TOKENS = 24_000
+MAX_INPUT_TOKENS_ENV = "GEMINI_MAX_INPUT_TOKENS"
+MAX_TOOL_ROUNDS = 5
+MAX_TOOL_CALLS_PER_ROUND = 8
 
 SYSTEM_INSTRUCTION = """You are a helpful chat assistant.
 Use the provided functions when the user requests note, memory, or task operations.
@@ -46,8 +51,6 @@ Use delete_task to remove one task (find its id with list_tasks first).
 If the user asks for an operation that no function supports, say plainly that
 you cannot do it. Never pretend that an action was performed."""
 
-MAX_TOOL_ROUNDS = 5
-MAX_TOOL_CALLS_PER_ROUND = 8
 CLEAR_CONFIRMATION_PROMPT = (
     "To confirm deleting all notes, reply exactly "
     "`confirm clear notes {token}`."
@@ -56,17 +59,14 @@ _CLEAR_CONFIRMATION_PATTERN = re.compile(
     r"To confirm deleting all notes, reply exactly "
     r"`confirm clear notes ([A-Za-z0-9_-]+)`\.$"
 )
-
 CLEAR_TASKS_CONFIRMATION_PROMPT = (
     "To confirm deleting all tasks, reply exactly "
     "`confirm clear tasks {token}`."
 )
-# A different phrase per target, so a notes token can never confirm a task wipe.
 _CLEAR_TASKS_CONFIRMATION_PATTERN = re.compile(
     r"To confirm deleting all tasks, reply exactly "
     r"`confirm clear tasks ([A-Za-z0-9_-]+)`\.$"
 )
-
 PROMPT_INJECTION_PATTERN = re.compile(
     r"(?:ignore\s+(?:the\s+)?previous\s+(?:instructions?|rules?)"
     r"|reveal\s+(?:the\s+)?system\s+prompt"
@@ -129,7 +129,11 @@ FUNCTION_DECLARATIONS = [
         parameters=_object_schema(
             {
                 "title": _schema("STRING", description="A short memory title.", min_length=1),
-                "content": _schema("STRING", description="The stable personal fact to remember.", min_length=1),
+                "content": _schema(
+                    "STRING",
+                    description="The stable personal fact to remember.",
+                    min_length=1,
+                ),
             },
             required=["title", "content"],
         ),
@@ -140,9 +144,7 @@ FUNCTION_DECLARATIONS = [
         parameters=_object_schema(
             {
                 "note_id": _schema(
-                    "INTEGER",
-                    description="The note's numeric ID.",
-                    minimum=1,
+                    "INTEGER", description="The note's numeric ID.", minimum=1
                 ),
                 "title": _schema("STRING", description="The updated note title.", min_length=1),
                 "content": _schema("STRING", description="The updated note text.", min_length=1),
@@ -156,9 +158,7 @@ FUNCTION_DECLARATIONS = [
         parameters=_object_schema(
             {
                 "memory_id": _schema(
-                    "INTEGER",
-                    description="The memory's numeric ID.",
-                    minimum=1,
+                    "INTEGER", description="The memory's numeric ID.", minimum=1
                 ),
                 "title": _schema("STRING", description="The updated memory title.", min_length=1),
                 "content": _schema("STRING", description="The updated memory text.", min_length=1),
@@ -175,9 +175,7 @@ FUNCTION_DECLARATIONS = [
         parameters=_object_schema(
             {
                 "memory_id": _schema(
-                    "INTEGER",
-                    description="The memory's numeric ID.",
-                    minimum=1,
+                    "INTEGER", description="The memory's numeric ID.", minimum=1
                 ),
             },
             required=["memory_id"],
@@ -187,19 +185,17 @@ FUNCTION_DECLARATIONS = [
         name="search_notes",
         description="Search the signed-in user's notes by meaning and keywords.",
         parameters=_object_schema(
-            {
-                "keyword": _schema("STRING", description="Text to search for.", min_length=1),
-            },
+            {"keyword": _schema("STRING", description="Text to search for.", min_length=1)},
             required=["keyword"],
         ),
     ),
     types.FunctionDeclaration(
         name="search_memories",
-        description="Search the signed-in user's long-term memories by meaning and keywords.",
+        description=(
+            "Search the signed-in user's long-term memories by meaning and keywords."
+        ),
         parameters=_object_schema(
-            {
-                "keyword": _schema("STRING", description="Text to search for.", min_length=1),
-            },
+            {"keyword": _schema("STRING", description="Text to search for.", min_length=1)},
             required=["keyword"],
         ),
     ),
@@ -234,11 +230,7 @@ FUNCTION_DECLARATIONS = [
         ),
         parameters=_object_schema(
             {
-                "title": _schema(
-                    "STRING",
-                    description="The task title.",
-                    min_length=1
-                ),
+                "title": _schema("STRING", description="The task title.", min_length=1),
                 "due_at_local": _schema(
                     "STRING",
                     description=(
@@ -260,9 +252,7 @@ FUNCTION_DECLARATIONS = [
         parameters=_object_schema(
             {
                 "task_id": _schema(
-                    "INTEGER",
-                    description="The task's numeric ID.",
-                    minimum=1,
+                    "INTEGER", description="The task's numeric ID.", minimum=1
                 ),
                 "due_at_local": _schema(
                     "STRING",
@@ -289,9 +279,7 @@ FUNCTION_DECLARATIONS = [
         parameters=_object_schema(
             {
                 "task_id": _schema(
-                    "INTEGER",
-                    description="The task's numeric ID.",
-                    minimum=1,
+                    "INTEGER", description="The task's numeric ID.", minimum=1
                 ),
             },
             required=["task_id"],
@@ -312,9 +300,7 @@ FUNCTION_DECLARATIONS = [
         parameters=_object_schema(
             {
                 "task_id": _schema(
-                    "INTEGER",
-                    description="The task's numeric ID.",
-                    minimum=1,
+                    "INTEGER", description="The task's numeric ID.", minimum=1
                 ),
             },
             required=["task_id"],
@@ -366,11 +352,85 @@ class ToolExecutionResult:
     confirmation_prompt: str | None = None
 
 
-ToolResultCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+TurnEvent = (
+    tuple[Literal["chunk", "final"], str]
+    | tuple[Literal["tool_result"], str, dict[str, Any]]
+)
+
+
+def _max_input_tokens() -> int:
+    value = os.getenv(MAX_INPUT_TOKENS_ENV, str(DEFAULT_MAX_INPUT_TOKENS))
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{MAX_INPUT_TOKENS_ENV} must be a positive integer.") from exc
+    if limit < 1:
+        raise ValueError(f"{MAX_INPUT_TOKENS_ENV} must be a positive integer.")
+    return limit
+
+
+def _contents_for_history(
+    history: list[dict[str, str]],
+    message: str,
+) -> list[types.Content]:
+    contents = [
+        types.Content(
+            role="user" if item["role"] == "user" else "model",
+            parts=[types.Part.from_text(text=item["content"])],
+        )
+        for item in history
+    ]
+    contents.append(
+        types.Content(role="user", parts=[types.Part.from_text(text=message)])
+    )
+    return contents
+
+
+def _count_tokens_sync(gemini_client, model: str, contents: list[types.Content]) -> int:
+    result = gemini_client.models.count_tokens(model=model, contents=contents)
+    if result.total_tokens is None:
+        raise ValueError("Gemini did not return an input token count.")
+    return result.total_tokens
+
+
+def bounded_contents_sync(
+    message: str,
+    gemini_client,
+    model: str,
+    history: list[dict[str, str]],
+) -> list[types.Content]:
+    """Build token-bounded Gemini contents using the synchronous client."""
+    token_limit = _max_input_tokens()
+    contents = _contents_for_history(history, message)
+    if _count_tokens_sync(gemini_client, model, contents) <= token_limit:
+        return contents
+
+    current_message = _contents_for_history([], message)
+    if _count_tokens_sync(gemini_client, model, current_message) > token_limit:
+        raise ValueError("The current message exceeds the Gemini input token limit.")
+
+    starts = [0]
+    starts.extend(
+        index
+        for index, item in enumerate(history)
+        if index > 0 and item["role"] == "user"
+    )
+    starts.append(len(history))
+
+    too_many_history = 0
+    fits = len(starts) - 1
+    while too_many_history + 1 < fits:
+        midpoint = (too_many_history + fits) // 2
+        candidate = _contents_for_history(history[starts[midpoint]:], message)
+        if _count_tokens_sync(gemini_client, model, candidate) <= token_limit:
+            fits = midpoint
+        else:
+            too_many_history = midpoint
+
+    return _contents_for_history(history[starts[fits]:], message)
 
 
 def _validate_arguments(name: str, arguments: Any) -> dict[str, Any]:
-    # makes sure Gemini provides the correct arguments, correct data types, and valid values.
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict) or any(
@@ -463,10 +523,14 @@ def _clear_tasks_confirmation_is_valid(
     return match is not None and user_message.strip() == f"confirm clear tasks {match[1]}"
 
 
-async def dispatch_tool_call(
+def _with_idempotency_key(key: str | None) -> str:
+    return key or secrets.token_urlsafe(24)
+
+
+def dispatch_tool_call(
     name: str | None,
     arguments: Any,
-    stub,
+    user_id: int,
     *,
     user_message: str,
     history: list[dict[str, str]],
@@ -474,7 +538,7 @@ async def dispatch_tool_call(
     gemini_client=None,
     idempotency_key: str | None = None,
 ) -> ToolExecutionResult:
-    """Validate and execute one declared tool through the authenticated gRPC stub."""
+    """Validate and execute one declared tool against in-process storage."""
     if name not in _TOOL_FIELDS:
         raise ValueError(f"Unknown Gemini tool: {name!r}.")
 
@@ -484,70 +548,72 @@ async def dispatch_tool_call(
         return ToolExecutionResult({"error": str(exc)})
 
     if name == "save_note":
-        result = await stub.SaveNote(
-            chat_pb2.SaveNoteRequest(
-                title=args["title"],
-                content=args["content"],
-            )
+        note = db.save_note_idempotent(
+            user_id,
+            args["title"],
+            args["content"],
+            _with_idempotency_key(idempotency_key),
         )
         return ToolExecutionResult({
-            "note_id": result.note.id,
-            "title": result.note.title,
+            "note_id": note["id"],
+            "title": note["title"],
             "status": "📝 Note added",
         })
 
     if name == "save_memory":
-        result = await stub.SaveMemory(
-            chat_pb2.SaveMemoryRequest(
-                title=args["title"],
-                content=args["content"],
-            )
+        memory = memory_store.save_memory_idempotent(
+            user_id,
+            args["title"],
+            args["content"],
+            _with_idempotency_key(idempotency_key),
         )
         return ToolExecutionResult({
-            "memory_id": result.memory.id,
-            "title": result.memory.title,
-            "content": result.memory.content,
+            "memory_id": memory["id"],
+            "title": memory["title"],
+            "content": memory["content"],
             "status": "🧠 Memory saved",
         })
 
     if name == "update_note":
-        result = await stub.UpdateNote(
-            chat_pb2.UpdateNoteRequest(
-                note_id=args["note_id"],
-                title=args["title"],
-                content=args["content"],
-            )
+        result = db.update_note_idempotent(
+            user_id,
+            args["note_id"],
+            args["title"],
+            args["content"],
+            _with_idempotency_key(idempotency_key),
         )
+        if not result["found"]:
+            return ToolExecutionResult({"error": "Note not found."})
         return ToolExecutionResult({
-            "note_id": result.note.id,
-            "title": result.note.title,
+            "note_id": result["id"],
+            "title": result["title"],
             "status": "📝 Note updated",
         })
 
     if name == "update_memory":
-        result = await stub.UpdateMemory(
-            chat_pb2.UpdateMemoryRequest(
-                memory_id=args["memory_id"],
-                title=args["title"],
-                content=args["content"],
-            )
+        result = memory_store.update_memory_idempotent(
+            user_id,
+            args["memory_id"],
+            args["title"],
+            args["content"],
+            _with_idempotency_key(idempotency_key),
         )
+        if not result["found"]:
+            return ToolExecutionResult({"error": "Memory not found."})
         return ToolExecutionResult({
-            "memory_id": result.memory.id,
-            "title": result.memory.title,
+            "memory_id": result["id"],
+            "title": result["title"],
             "status": "🧠 Memory updated",
         })
 
     if name == "delete_memory":
-        result = await stub.DeleteMemory(
-            chat_pb2.DeleteMemoryRequest(memory_id=args["memory_id"])
-        )
+        success = memory_store.delete_memory(user_id, args["memory_id"])
         return ToolExecutionResult({
             "memory_id": args["memory_id"],
-            "success": result.success,
+            "success": success,
             "status": (
                 "🗑️ Memory deleted"
-                if result.success
+                if success
                 else "⚠️ Memory not found, nothing deleted"
             ),
         })
@@ -559,7 +625,7 @@ async def dispatch_tool_call(
         if search_requested and gemini_client is not None:
             model = embedding_model()
             try:
-                query_embedding = await embed_text_async(
+                query_embedding = embed_text(
                     gemini_client,
                     keyword,
                     task_type=QUERY_TASK_TYPE,
@@ -571,57 +637,42 @@ async def dispatch_tool_call(
                     "memory" if is_memory else "note",
                     exc_info=True,
                 )
-                if is_memory:
-                    result = await stub.SearchMemories(
-                        chat_pb2.SearchMemoriesRequest(keyword=keyword)
-                    )
-                else:
-                    result = await stub.SearchNotes(
-                        chat_pb2.SearchNotesRequest(keyword=keyword)
-                    )
+                rows = (
+                    memory_store.search_memories(user_id, keyword)
+                    if is_memory
+                    else db.search_notes(user_id, keyword)
+                )
             else:
-                if is_memory:
-                    result = await stub.SearchMemoriesHybrid(
-                        chat_pb2.SearchMemoriesHybridRequest(
-                            keyword=keyword,
-                            embedding=query_embedding,
-                            embedding_model=model,
-                            limit=20,
-                        )
+                rows = (
+                    memory_store.search_memories_hybrid(
+                        user_id, keyword, query_embedding, model, limit=20
                     )
-                else:
-                    result = await stub.SearchNotesHybrid(
-                        chat_pb2.SearchNotesHybridRequest(
-                            keyword=keyword,
-                            embedding=query_embedding,
-                            embedding_model=model,
-                            limit=20,
-                        )
+                    if is_memory
+                    else db.search_notes_hybrid(
+                        user_id, keyword, query_embedding, model, limit=20
                     )
+                )
         elif search_requested:
-            if is_memory:
-                result = await stub.SearchMemories(
-                    chat_pb2.SearchMemoriesRequest(keyword=keyword)
-                )
-            else:
-                result = await stub.SearchNotes(
-                    chat_pb2.SearchNotesRequest(keyword=keyword)
-                )
+            rows = (
+                memory_store.search_memories(user_id, keyword)
+                if is_memory
+                else db.search_notes(user_id, keyword)
+            )
         elif is_memory:
-            result = await stub.ListMemories(chat_pb2.ListMemoriesRequest())
+            rows, _ = memory_store.list_memories(user_id, limit=20)
         else:
-            result = await stub.SearchNotes(chat_pb2.SearchNotesRequest())
-        rows = result.memories if is_memory else result.notes
+            rows = db.search_notes(user_id, "")
+
         response_key = "memories" if is_memory else "notes"
         return ToolExecutionResult({
             response_key: [
                 {
-                    "id": note.id,
-                    "title": note.title,
-                    "content": note.content,
-                    "created_at": note.created_at,
+                    "id": row["id"],
+                    "title": row["title"],
+                    "content": row["content"],
+                    "created_at": row["created_at"],
                 }
-                for note in rows
+                for row in rows
             ],
         })
 
@@ -632,145 +683,129 @@ async def dispatch_tool_call(
                 {"confirmation_required": True, "message": prompt},
                 confirmation_prompt=prompt,
             )
-        result = await stub.ClearNotes(chat_pb2.ClearNotesRequest())
+        result = db.clear_notes_idempotent(
+            user_id, _with_idempotency_key(idempotency_key)
+        )
         return ToolExecutionResult({
-            "deleted_count": result.deleted_count,
+            "deleted_count": result["deleted_count"],
             "status": (
                 "🗑️ Notes cleared"
-                if result.deleted_count
+                if result["deleted_count"]
                 else "ℹ️ No notes to clear"
             ),
         })
 
     if name == "create_task":
-        result = await stub.CreateTask(
-            chat_pb2.CreateTaskRequest(
-                title=args["title"],
-                due_at_local=args["due_at_local"],
-                idempotency_key=idempotency_key or secrets.token_urlsafe(24),
-            )
+        task = db.create_task_idempotent(
+            user_id,
+            args["title"],
+            args["due_at_local"],
+            _with_idempotency_key(idempotency_key),
         )
-
-        due_at_utc = (
-            result.task.due_at_utc
-            or result.task.legacy_due_date
-        )
-
+        due_at_utc = task["due_at_utc"] or task["legacy_due_date"]
         due_at_local_display = ""
-
-        if result.task.due_at_utc:
+        if task["due_at_utc"]:
             instant = datetime.fromisoformat(
-                result.task.due_at_utc.replace("Z", "+00:00")
+                task["due_at_utc"].replace("Z", "+00:00")
             )
-
-            local = instant.astimezone(
-                ZoneInfo(result.task.timezone or "UTC")
-            )
-
-            due_at_local_display = local.strftime(
-                "%b %-d, %Y at %-I:%M %p"
-            )
-
+            local = instant.astimezone(ZoneInfo(task["timezone"] or "UTC"))
+            due_at_local_display = local.strftime("%b %-d, %Y at %-I:%M %p")
         return ToolExecutionResult({
-            "task_id": result.task.id,
-            "title": result.task.title,
+            "task_id": task["id"],
+            "title": task["title"],
             "due_at_utc": due_at_utc,
             "due_at_local_display": due_at_local_display,
-            "timezone": result.task.timezone,
+            "timezone": task["timezone"],
             "status": "📌 Task added",
         })
 
     if name == "update_task":
-        result = await stub.UpdateTask(
-            chat_pb2.UpdateTaskRequest(
-                task_id=args["task_id"],
-                due_at_local=args["due_at_local"],
-                idempotency_key=idempotency_key or secrets.token_urlsafe(24),
-            )
+        result = db.update_task_deadline_idempotent(
+            user_id,
+            args["task_id"],
+            args["due_at_local"],
+            _with_idempotency_key(idempotency_key),
         )
+        if not result.get("found"):
+            return ToolExecutionResult({"error": "Task not found."})
         return ToolExecutionResult({
-            "task_id": result.task.id,
-            "title": result.task.title,
-            "due_at_utc": result.task.due_at_utc,
-            "timezone": result.task.timezone,
+            "task_id": result["id"],
+            "title": result["title"],
+            "due_at_utc": result["due_at_utc"],
+            "timezone": result["timezone"],
             "status": "📅 Task deadline updated",
         })
 
     if name == "list_tasks":
-        result = await stub.ListTasks(chat_pb2.ListTasksRequest())
+        tasks = db.get_tasks(user_id)
         return ToolExecutionResult({
             "tasks": [
                 {
-                    "id": task.id,
-                    "title": task.title,
-                    "due_at_utc": task.due_at_utc or task.legacy_due_date,
-                    "timezone": task.timezone,
-                    "completed": task.completed,
-                    "status": "✅ Completed" if task.completed else "⏳ Pending",
+                    "id": task["id"],
+                    "title": task["title"],
+                    "due_at_utc": task["due_at_utc"] or task["legacy_due_date"],
+                    "timezone": task["timezone"],
+                    "completed": task["completed"],
+                    "status": "✅ Completed" if task["completed"] else "⏳ Pending",
                 }
-                for task in result.tasks
+                for task in tasks
             ],
         })
 
     if name == "delete_task":
         task_id = args["task_id"]
-        result = await stub.DeleteTask(
-            chat_pb2.DeleteTaskRequest(
-                task_id=task_id,
-                idempotency_key=idempotency_key or secrets.token_urlsafe(24),
-            )
+        result = db.delete_task_idempotent(
+            user_id, task_id, _with_idempotency_key(idempotency_key)
         )
         return ToolExecutionResult({
             "task_id": task_id,
-            "success": result.success,
+            "success": result["success"],
             "status": (
                 "🗑️ Task deleted"
-                if result.success
+                if result["success"]
                 else "⚠️ Task not found, nothing deleted"
             ),
         })
 
     if name == "clear_tasks":
         if not _clear_tasks_confirmation_is_valid(user_message, history):
-            prompt = CLEAR_TASKS_CONFIRMATION_PROMPT.format(token=confirmation_token)
+            prompt = CLEAR_TASKS_CONFIRMATION_PROMPT.format(
+                token=confirmation_token
+            )
             return ToolExecutionResult(
                 {"confirmation_required": True, "message": prompt},
                 confirmation_prompt=prompt,
             )
-        result = await stub.ClearTasks(
-            chat_pb2.ClearTasksRequest(
-                idempotency_key=idempotency_key or secrets.token_urlsafe(24)
-            )
+        result = db.clear_tasks_idempotent(
+            user_id, _with_idempotency_key(idempotency_key)
         )
         return ToolExecutionResult({
-            "deleted_count": result.deleted_count,
+            "deleted_count": result["deleted_count"],
             "status": (
                 "🗑️ Tasks cleared"
-                if result.deleted_count
+                if result["deleted_count"]
                 else "ℹ️ No tasks to clear"
             ),
         })
 
     task_id = args["task_id"]
-    result = await stub.CompleteTask(
-        chat_pb2.CompleteTaskRequest(
-            task_id=task_id,
-            idempotency_key=idempotency_key or secrets.token_urlsafe(24),
-        )
+    result = db.complete_task_idempotent(
+        user_id, task_id, _with_idempotency_key(idempotency_key)
     )
     return ToolExecutionResult({
         "task_id": task_id,
-        "success": result.success,
+        "success": result["success"],
         "status": (
             "✅ Task completed"
-            if result.success
+            if result["success"]
             else "⚠️ Task not found or not completed"
         ),
     })
 
 
-def _response_content_and_calls(response):
-    # extracts and organizes Gemini's response
+def _response_content_and_calls(
+    response,
+) -> tuple[types.Content | None, list[types.FunctionCall]]:
     candidates = response.candidates or []
     if not candidates or candidates[0].content is None:
         return None, []
@@ -793,42 +828,74 @@ def _final_text(response, confirmation_prompt: str | None = None) -> str:
     return text
 
 
-async def _continue_function_calls(
+def _tool_idempotency_key(
+    request_id: str,
+    round_index: int,
+    call_index: int,
+    call,
+) -> str:
+    if request_id:
+        request_hash = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:64]
+        return f"{request_hash}:{round_index}:{call_index}"
+    return getattr(call, "id", None) or secrets.token_urlsafe(24)
+
+
+def run_turn(
     message: str,
     gemini_client,
     model: str,
     history: list[dict[str, str]],
-    stub,
-    contents: list[types.Content],
-    content: types.Content,
-    calls: list[types.FunctionCall],
-    *,
-    on_tool_result: ToolResultCallback | None = None,
-) -> str:
+    user_id: int,
+    request_id: str,
+) -> Iterator[TurnEvent]:
+    """Yield text chunks, tool results, and a final response synchronously."""
+    contents = bounded_contents_sync(message, gemini_client, model, history)
+    stream = gemini_client.models.generate_content_stream(
+        model=model,
+        contents=contents,
+        config=TOOL_CONFIG,
+    )
+    parts = []
+    calls = []
+    with closing(stream):
+        for chunk in stream:
+            candidates = chunk.candidates or []
+            if not candidates or candidates[0].content is None:
+                continue
+            for part in candidates[0].content.parts or []:
+                parts.append(part)
+                if part.function_call is not None:
+                    calls.append(part.function_call)
+                elif part.text:
+                    yield ("chunk", part.text)
+
+    if not calls:
+        return
+
+    content = types.Content(role="model", parts=parts)
     confirmation_token = secrets.token_urlsafe(8)
     confirmation_prompt = None
-    # Execute Gemini tool calls, return results to Gemini, and repeat until a final response is generated.
-    for _ in range(MAX_TOOL_ROUNDS):
+    for round_index in range(MAX_TOOL_ROUNDS):
         if len(calls) > MAX_TOOL_CALLS_PER_ROUND:
             raise ValueError("Gemini requested too many tools at once.")
         contents.append(content)
         tool_responses = []
-        for call in calls:
+        for call_index, call in enumerate(calls):
             if not call.name:
                 raise ValueError("Gemini returned a tool call without a name.")
-            result = await dispatch_tool_call(
+            result = dispatch_tool_call(
                 call.name,
                 call.args,
-                stub,
+                user_id,
                 user_message=message,
                 history=history,
                 confirmation_token=confirmation_token,
                 gemini_client=gemini_client,
-                idempotency_key=getattr(call, "id", None)
-                or secrets.token_urlsafe(24),
+                idempotency_key=_tool_idempotency_key(
+                    request_id, round_index, call_index, call
+                ),
             )
-            if on_tool_result is not None:
-                await on_tool_result(call.name, result.response)
+            yield ("tool_result", call.name, result.response)
             if result.confirmation_prompt:
                 confirmation_prompt = result.confirmation_prompt
             tool_responses.append(
@@ -839,92 +906,17 @@ async def _continue_function_calls(
             )
         contents.append(types.Content(role="user", parts=tool_responses))
 
-        config = (
-            FINAL_RESPONSE_CONFIG
-            if confirmation_prompt
-            else TOOL_CONFIG
-        )
-        response = await gemini_client.models.generate_content(
+        config = FINAL_RESPONSE_CONFIG if confirmation_prompt else TOOL_CONFIG
+        response = gemini_client.models.generate_content(
             model=model,
             contents=contents,
             config=config,
         )
         content, calls = _response_content_and_calls(response)
         if not calls:
-            return _final_text(response, confirmation_prompt)
+            yield ("final", _final_text(response, confirmation_prompt))
+            return
         if content is None:
             raise ValueError("Gemini returned tool calls without response content.")
 
     raise ValueError("Gemini exceeded the maximum tool-call rounds.")
-
-
-async def handle_function_calls(
-    message: str,
-    gemini_client,
-    model: str,
-    history: list[dict[str, str]],
-    stub,
-    *,
-    on_tool_result: ToolResultCallback | None = None,
-    on_text: Callable[[str], Awaitable[None]] | None = None,
-) -> str | None:
-    """Stream initial text and return a tool-based reply, if any."""
-    contents = await bounded_contents(message, gemini_client, model, history)
-    stream = await gemini_client.models.generate_content_stream(
-        model=model,
-        contents=contents,
-        config=TOOL_CONFIG,
-    )
-    parts = []
-    calls = []
-    async with contextlib.aclosing(stream):
-        async for chunk in stream:
-            candidates = chunk.candidates or []
-            if not candidates or candidates[0].content is None:
-                continue
-            for part in candidates[0].content.parts or []:
-                parts.append(part)
-                if part.function_call is not None:
-                    calls.append(part.function_call)
-                elif part.text and on_text is not None:
-                    await on_text(part.text)
-
-    if not calls:
-        return None
-    content = types.Content(role="model", parts=parts)
-
-    task = asyncio.create_task(
-        _continue_function_calls(
-            message,
-            gemini_client,
-            model,
-            history,
-            stub,
-            contents,
-            content,
-            calls,
-            on_tool_result=on_tool_result,
-        )
-    )
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        return await task
-
-
-async def save_conversation(
-    message: str,
-    response: str,
-    stub,
-    conversation_id: int,
-    request_id: str = "",
-) -> None:
-    """Persist the completed exchange through gRPC."""
-    await stub.SaveConversation(
-        chat_pb2.SaveConversationRequest(
-            user_content=message,
-            assistant_content=response,
-            conversation_id=conversation_id,
-            request_id=request_id,
-        )
-    )

@@ -2,14 +2,14 @@
 
 How it works (the important part):
 
-* A generation (one Gemini reply) is an asyncio task owned by the
+* A generation (one service reply) is an asyncio task owned by the
   `GenerationHub`, NOT by the WebSocket that started it.
 * The hub is keyed by (user_id, conversation_id), so every conversation has
   its own generation and its own status. Different conversations can generate
   at the same time.
 * WebSockets are only "viewers": they subscribe to their user's events.
   Closing a socket (switching chat, refreshing the page, a network drop) just
-  unsubscribes it. The task keeps running and saves its answer to the database.
+  unsubscribes it. The task keeps consuming the service stream.
 * Every event carries conversation_id and request_id so the browser can route
   it to the right conversation and ignore stale ones.
 """
@@ -23,13 +23,8 @@ from dataclasses import dataclass, field
 
 import grpc
 from fastapi import WebSocket, WebSocketDisconnect
-from google.genai import errors
 
 from backend.generated import chat_pb2
-from backend.orchestrator.intent_handler import (
-    handle_function_calls,
-    save_conversation,
-)
 from backend.orchestrator.rate_limit import message_limit_retry_after
 
 log = logging.getLogger("orchestrator")
@@ -170,13 +165,11 @@ hub = GenerationHub()
 async def _run_generation(
     gen: Generation,
     stub,
-    gemini_client,
-    model: str,
     message: str,
     *,
     message_id: int | None = None,
 ) -> None:
-    """Produce one reply, save it, and tell whoever is watching."""
+    """Bridge the service's gRPC stream to the existing WebSocket events."""
     conversation_id = gen.conversation_id
     request_id = gen.request_id
 
@@ -188,124 +181,82 @@ async def _run_generation(
             **fields,
         })
 
-    async def emit_tool_result(tool: str, result: dict) -> None:
-        tool_result = {"tool": tool, "result": result}
-        index = len(gen.tool_results)
-        gen.tool_results.append(tool_result)
-        await emit("tool_result", index=index, **tool_result)
-
     async def emit_text(text: str) -> None:
         offset = len(gen.text)
         gen.chunks.append(text)
         await emit("chunk", content=text, offset=offset)
 
+    async def emit_tool_result(tool: str, result: dict) -> None:
+        index = len(gen.tool_results)
+        tool_result = {"tool": tool, "result": result}
+        gen.tool_results.append(tool_result)
+        await emit("tool_result", index=index, **tool_result)
+
     terminal: tuple[str, dict] | None = None
     cancelled = False
     try:
-        history = []
-        replace_assistant_id = None
-
-        if gen.mode == "edit" and message_id is not None:
-            # Editing a branch updates the original row and deletes every later
-            # message before Gemini sees the edited prompt.
-            edited = await stub.EditConversationMessage(
-                chat_pb2.EditConversationMessageRequest(
-                    conversation_id=conversation_id,
-                    message_id=message_id,
-                    content=message,
-                    request_id=request_id,
-                )
-            )
-            message = edited.user_content
-            conversation = await stub.GetConversation(
-                chat_pb2.GetConversationRequest(conversation_id=conversation_id)
-            )
-            history = [
-                {"role": item.role, "content": item.content}
-                for item in conversation.messages
-                if item.message_id != message_id
-            ]
-        elif gen.mode == "regenerate" and gen.assistant_message_id is not None:
-            context = await stub.RegenerateConversationMessage(
-                chat_pb2.RegenerateConversationMessageRequest(
-                    conversation_id=conversation_id,
-                    assistant_message_id=gen.assistant_message_id,
-                    request_id=request_id,
-                )
-            )
-            message = context.user_content
-            history = [
-                {"role": item.role, "content": item.content}
-                for item in context.history
-            ]
-            replace_assistant_id = gen.assistant_message_id
-        else:
-            conversation = await stub.GetConversation(
-                chat_pb2.GetConversationRequest(conversation_id=conversation_id)
-            )
-            history = [
-                {"role": item.role, "content": item.content}
-                for item in conversation.messages
-            ]
-
         await emit("start", role="assistant")
-        tool_response = await handle_function_calls(
-            message,
-            gemini_client,
-            model,
-            history,
-            stub,
-            on_tool_result=emit_tool_result,
-            on_text=emit_text,
-        )
+        stream = stub.StreamMessage(chat_pb2.ChatTurnRequest(
+            conversation_id=conversation_id,
+            message=message,
+            request_id=request_id,
+            mode=gen.mode,
+            message_id=message_id or 0,
+            assistant_message_id=gen.assistant_message_id or 0,
+        ))
+        saw_terminal = False
+        try:
+            async for event in stream:
+                if saw_terminal:
+                    raise ValueError("Chat stream returned events after termination.")
+                payload = event.WhichOneof("payload")
+                if payload == "started":
+                    continue
+                elif payload == "chunk":
+                    await emit_text(event.chunk.content)
+                elif payload == "tool_result":
+                    result = json.loads(event.tool_result.result_json)
+                    await emit_tool_result(event.tool_result.tool, result)
+                elif payload == "completed":
+                    full_text = event.completed.full_text
+                    if not full_text:
+                        raise ValueError("Gemini returned an empty response.")
+                    if not full_text.startswith(gen.text):
+                        raise ValueError(
+                            "Completed response did not match streamed text."
+                        )
+                    suffix = full_text[len(gen.text):]
+                    if suffix:
+                        await emit_text(suffix)
+                    terminal = ("complete", {})
+                    saw_terminal = True
+                elif payload == "cancelled":
+                    terminal = ("cancelled", {})
+                    saw_terminal = True
+                elif payload == "error":
+                    terminal = (
+                        "error",
+                        {"error": f"Message failed: {event.error.message}"},
+                    )
+                    saw_terminal = True
+                else:
+                    raise ValueError("Chat stream returned an unknown event.")
+        except asyncio.CancelledError:
+            stream.cancel()
+            raise
+        except grpc.aio.AioRpcError as exc:
+            terminal = ("error", {"error": f"Message failed: {exc.details()}"})
+            saw_terminal = True
 
-        if tool_response is not None:
-            await emit_text(("\n\n" if gen.text else "") + tool_response)
-
-        response = gen.text
-        if not response:
-            raise ValueError("Gemini returned an empty response.")
-
-        # Save BEFORE announcing "complete": the database is the source of
-        # truth, and it is written even if nobody is watching any more.
-        if replace_assistant_id is not None:
-            replaced = await stub.ReplaceConversationMessage(
-                chat_pb2.ReplaceConversationMessageRequest(
-                    conversation_id=conversation_id,
-                    message_id=replace_assistant_id,
-                    content=response,
-                    request_id=request_id,
-                )
-            )
-            if not replaced.success:
-                raise ValueError("Could not replace the assistant response.")
-        else:
-            # For "edit" the user row already exists; the database layer
-            # notices that and only appends the assistant reply.
-            await save_conversation(
-                message, response, stub, conversation_id, request_id,
-            )
-        terminal = ("complete", {})
+        if not saw_terminal:
+            raise ValueError("Chat stream ended without a terminal event.")
 
     except asyncio.CancelledError:
         cancelled = True
-        partial = gen.text
-        # Keep what was streamed so far, except when regenerating: there the
-        # old answer is still in the database and must not be duplicated.
-        if partial and gen.mode != "regenerate":
-            try:
-                await save_conversation(
-                    message, partial, stub, conversation_id, request_id,
-                )
-            except grpc.aio.AioRpcError:
-                log.exception("Could not save the partial reply")
         terminal = ("cancelled", {})
 
-    except Exception as exc:  # noqa: BLE001 - a background task must report, not vanish
-        if isinstance(exc, (errors.APIError, grpc.aio.AioRpcError, ValueError)):
-            log.exception("Failed to process chat message")
-        else:
-            log.exception("Unexpected error while generating a reply")
+    except Exception as exc:
+        log.exception("Failed to process chat message")
         terminal = ("error", {"error": f"Message failed: {exc}"})
 
     finally:
@@ -323,8 +274,6 @@ async def _run_generation(
 async def websocket_endpoint(
     websocket: WebSocket,
     stub,
-    gemini_client,
-    model: str,
     *,
     user_id: int,
     revalidate_session: Callable[[], Awaitable[int | None]] | None = None,
@@ -444,7 +393,7 @@ async def websocket_endpoint(
             hub.start(
                 gen,
                 lambda g, message=message, message_id=message_id: _run_generation(
-                    g, stub, gemini_client, model, message,
+                    g, stub, message,
                     message_id=message_id,
                 ),
             )

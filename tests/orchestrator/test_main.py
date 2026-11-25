@@ -10,30 +10,13 @@ from backend.orchestrator import main
 
 @pytest.mark.asyncio
 async def test_lifespan_initializes_and_cleans_up(monkeypatch):
-    # Arrange
-    monkeypatch.setenv("GEMINI_API_KEY", "fake-api-key")
     monkeypatch.setenv("GRPC_TARGET", "service:50051")
 
     fake_channel = SimpleNamespace(close=AsyncMock())
     fake_stub = object()
-    fake_gemini_client = object()
 
     fake_channel_factory = Mock(return_value=fake_channel)
     fake_stub_factory = Mock(return_value=fake_stub)
-
-    class FakeGeminiContext:
-        def __init__(self):
-            self.aio = self
-            self.exited = False
-
-        async def __aenter__(self):
-            return fake_gemini_client
-
-        async def __aexit__(self, exc_type, exc_value, traceback):
-            self.exited = True
-
-    fake_gemini_context = FakeGeminiContext()
-    fake_gemini_factory = Mock(return_value=fake_gemini_context)
 
     monkeypatch.setattr(
         main.grpc.aio,
@@ -45,74 +28,50 @@ async def test_lifespan_initializes_and_cleans_up(monkeypatch):
         "ChatServiceStub",
         fake_stub_factory,
     )
-    monkeypatch.setattr(
-        main.genai,
-        "Client",
-        fake_gemini_factory,
-    )
 
     app = FastAPI()
 
-    # Act
     async with main.lifespan(app):
-        # Assert startup
         assert app.state.grpc_stub is fake_stub
-        assert app.state.gemini_client is fake_gemini_client
-        assert app.state.gemini_model == main.GEMINI_MODEL
 
         fake_channel_factory.assert_called_once_with("service:50051")
         fake_stub_factory.assert_called_once_with(fake_channel)
 
-        fake_gemini_factory.assert_called_once()
-
         assert fake_channel.close.await_count == 0
 
-    # Assert shutdown
     fake_channel.close.assert_awaited_once()
-    assert fake_gemini_context.exited is True
 
 
 @pytest.mark.asyncio
-async def test_lifespan_requires_gemini_api_key(monkeypatch):
-    # Arrange
+async def test_lifespan_does_not_require_gemini_api_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-    channel_factory = Mock()
 
     monkeypatch.setattr(
         main.grpc.aio,
         "insecure_channel",
-        channel_factory,
+        Mock(return_value=SimpleNamespace(close=AsyncMock())),
+    )
+    monkeypatch.setattr(
+        main.chat_pb2_grpc,
+        "ChatServiceStub",
+        Mock(return_value=object()),
     )
 
     app = FastAPI()
 
-    # Act and Assert
-    with pytest.raises(
-        RuntimeError,
-        match="Set GEMINI_API_KEY",
-    ):
-        async with main.lifespan(app):
-            pass
-
-    # No connection should be created.
-    channel_factory.assert_not_called()
+    async with main.lifespan(app):
+        assert hasattr(app.state, "grpc_stub")
 
 
 @pytest.mark.asyncio
 async def test_websocket_route_passes_dependencies(monkeypatch):
-    # Arrange
     fake_stub = object()
-    fake_gemini_client = object()
-    fake_model = "test-model"
 
     fake_websocket = SimpleNamespace(
         cookies={"session": "tok-123"},
         app=SimpleNamespace(
             state=SimpleNamespace(
                 grpc_stub=fake_stub,
-                gemini_client=fake_gemini_client,
-                gemini_model=fake_model,
             )
         )
     )
@@ -131,22 +90,17 @@ async def test_websocket_route_passes_dependencies(monkeypatch):
         AsyncMock(return_value=1),  # pretend the handshake is authenticated
     )
 
-    # Act
     await main.ws_chat(fake_websocket)
     assert endpoint.await_args.kwargs["user_id"] == 1
 
-    # Assert
     endpoint.assert_awaited_once()
-    ws_arg, stub_arg, client_arg, model_arg = endpoint.await_args.args
+    ws_arg, stub_arg = endpoint.await_args.args
     assert ws_arg is fake_websocket
     assert isinstance(stub_arg, main.SessionStub)
     assert stub_arg.stub is fake_stub
-    assert client_arg is fake_gemini_client
-    assert model_arg == fake_model
 
 @pytest.mark.asyncio
 async def test_websocket_route_rejects_unauthenticated(monkeypatch):
-    # Arrange
     fake_websocket = SimpleNamespace(close=AsyncMock())
     endpoint = AsyncMock()
 
@@ -155,16 +109,13 @@ async def test_websocket_route_rejects_unauthenticated(monkeypatch):
         main.auth, "authenticate_websocket", AsyncMock(return_value=None)
     )
 
-    # Act
     await main.ws_chat(fake_websocket)
 
-    # Assert
     fake_websocket.close.assert_awaited_once_with(code=1008)
     endpoint.assert_not_awaited()
 
 
 def test_websocket_route_is_registered():
-    # Assert
     assert any(
         route.path == "/ws"
         for route in main.app.routes

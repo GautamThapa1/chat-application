@@ -42,6 +42,11 @@ class ChatServiceStub:
                 request_serializer=chat__pb2.ChatMessage.SerializeToString,
                 response_deserializer=chat__pb2.ChatResponse.FromString,
                 _registered_method=True)
+        self.StreamMessage = channel.unary_stream(
+                '/chat.ChatService/StreamMessage',
+                request_serializer=chat__pb2.ChatTurnRequest.SerializeToString,
+                response_deserializer=chat__pb2.ChatEvent.FromString,
+                _registered_method=True)
         self.CreateConversation = channel.unary_unary(
                 '/chat.ChatService/CreateConversation',
                 request_serializer=chat__pb2.CreateConversationRequest.SerializeToString,
@@ -231,6 +236,12 @@ class ChatServiceServicer:
     """
 
     def SendMessage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def StreamMessage(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -460,6 +471,11 @@ def add_ChatServiceServicer_to_server(servicer, server):
                     request_deserializer=chat__pb2.ChatMessage.FromString,
                     response_serializer=chat__pb2.ChatResponse.SerializeToString,
             ),
+            'StreamMessage': grpc.unary_stream_rpc_method_handler(
+                    servicer.StreamMessage,
+                    request_deserializer=chat__pb2.ChatTurnRequest.FromString,
+                    response_serializer=chat__pb2.ChatEvent.SerializeToString,
+            ),
             'CreateConversation': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateConversation,
                     request_deserializer=chat__pb2.CreateConversationRequest.FromString,
@@ -671,6 +687,33 @@ class ChatService:
             '/chat.ChatService/SendMessage',
             chat__pb2.ChatMessage.SerializeToString,
             chat__pb2.ChatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StreamMessage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/chat.ChatService/StreamMessage',
+            chat__pb2.ChatTurnRequest.SerializeToString,
+            chat__pb2.ChatEvent.FromString,
             options,
             channel_credentials,
             insecure,

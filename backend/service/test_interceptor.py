@@ -483,6 +483,36 @@ def test_handler_can_see_authenticated_user_id(tmp_path, monkeypatch):
         current_user_id()
 
 
+def test_unary_stream_handler_keeps_authenticated_user_for_generator_lifetime(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test.db"))
+    db.init_db()
+    user_id = db.register_user("alice", "correct-horse")
+    token = db.create_session(user_id)
+
+    seen = []
+
+    def inner(request, context):
+        seen.append(current_user_id())
+        yield "first"
+        seen.append(current_user_id())
+        yield "second"
+
+    details = type("D", (), {"method": "/chat.ChatService/StreamMessage"})()
+    handler = AuthInterceptor().intercept_service(
+        lambda _: grpc.unary_stream_rpc_method_handler(inner), details
+    )
+
+    assert list(handler.unary_stream(object(), _FakeContext(token))) == [
+        "first",
+        "second",
+    ]
+    assert seen == [user_id, user_id]
+    with pytest.raises(RuntimeError):
+        current_user_id()
+
+
 def test_unknown_methods_are_protected_by_default():
     assert "/chat.ChatService/SaveNote" not in auth_interceptor.PUBLIC_METHODS
     assert "/chat.ChatService/SearchNotesHybrid" not in auth_interceptor.PUBLIC_METHODS

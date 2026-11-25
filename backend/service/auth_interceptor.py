@@ -43,8 +43,31 @@ class AuthInterceptor(grpc.ServerInterceptor):
         if handler is None or handler_call_details.method in PUBLIC_METHODS:
             return handler
 
-        # since we implemented uranry RPC, we don't allow streaming of messages
-        # from one call/method
+        if handler.response_streaming and not handler.request_streaming:
+            inner = handler.unary_stream
+
+            def authenticated_stream(request, context):
+                metadata = dict(context.invocation_metadata())
+                user_id = db.get_session_user(
+                    metadata.get(SESSION_METADATA_KEY, "")
+                )
+                if user_id is None:
+                    context.abort(
+                        grpc.StatusCode.UNAUTHENTICATED,
+                        "Missing or invalid session.",
+                    )
+                reset = _current_user.set(user_id)
+                try:
+                    yield from inner(request, context)
+                finally:
+                    _current_user.reset(reset)
+
+            return grpc.unary_stream_rpc_method_handler(
+                authenticated_stream,
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+
         if handler.request_streaming or handler.response_streaming:
             # Fail closed: refuse what we have not taught the interceptor yet.
             return _deny_handler(
