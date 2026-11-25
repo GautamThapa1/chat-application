@@ -301,7 +301,11 @@ message UpsertMemoryEmbeddingResponse {
 // =========================================================================== #
 message CreateTaskRequest {
   string title        = 1;
-  string due_at_local = 2;  // ISO local datetime or date; date defaults to 9 AM
+
+  // Local ISO date/datetime or today/tomorrow;
+  // date defaults to 9 AM
+
+  string due_at_local = 2;  
   string idempotency_key = 3;
 }
 

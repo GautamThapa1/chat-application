@@ -465,6 +465,7 @@ async def test_task_tools_dispatch_to_the_existing_grpc_methods():
         "task_id": 9,
         "title": "Review",
         "due_at_utc": "2099-12-01T17:00:00Z",
+        "due_at_local_display": "Dec 1, 2099 at 9:00 AM",
         "timezone": "America/Los_Angeles",
         "status": "📌 Task added",
     }

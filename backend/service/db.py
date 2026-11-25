@@ -10,7 +10,13 @@ import sqlite3
 import struct
 import tempfile
 import time
-from datetime import date, datetime, time as datetime_time, timezone as dt_timezone
+from datetime import (
+    date,
+    datetime,
+    time as datetime_time,
+    timedelta,
+    timezone as dt_timezone,
+)
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -1960,16 +1966,67 @@ def _timezone_info(timezone_name: str) -> ZoneInfo:
 
 def _parse_due_at(due_at_local: str, timezone_name: str) -> int:
     if not isinstance(due_at_local, str) or not due_at_local.strip():
-        raise ValueError("Deadline must be an ISO 8601 date or datetime.")
+        raise ValueError(
+            "Deadline must be an ISO 8601 date or datetime."
+        )
+
     value = due_at_local.strip()
     zone = _timezone_info(timezone_name)
+
     try:
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        relative = re.fullmatch(
+            r"(today|tomorrow)(?:\s+at\s+(\d{1,2}(?::\d{2})?\s*[AaPp][Mm]|\d{1,2}:\d{2}))?",
+            value,
+            re.IGNORECASE,
+        )
+
+        if relative:
+            target_date = datetime.now(zone).date()
+
+            if relative.group(1).lower() == "tomorrow":
+                target_date += timedelta(days=1)
+
+            time_text = relative.group(2)
+
+            if time_text:
+                normalized = time_text.upper().replace(" ", "")
+
+                formats = ("%I:%M%p", "%I%p", "%H:%M")
+                parsed_time = None
+
+                for time_format in formats:
+                    try:
+                        parsed_time = datetime.strptime(
+                            normalized,
+                            time_format
+                        ).time()
+                        break
+                    except ValueError:
+                        continue
+
+                if parsed_time is None:
+                    raise ValueError("Invalid local deadline time.")
+
+                local = datetime.combine(
+                    target_date,
+                    parsed_time
+                )
+
+            else:
+                local = datetime.combine(
+                    target_date,
+                    datetime_time(hour=9)
+                )
+
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
             local = datetime.combine(
-                date.fromisoformat(value), datetime_time(hour=9)
+                date.fromisoformat(value),
+                datetime_time(hour=9)
             )
+
         else:
             local = datetime.fromisoformat(value)
+
     except ValueError as exc:
         raise ValueError(
             "Deadline must use ISO 8601, such as 2026-12-01 or "
@@ -1978,17 +2035,24 @@ def _parse_due_at(due_at_local: str, timezone_name: str) -> int:
 
     if local.tzinfo is None:
         localized = local.replace(tzinfo=zone)
+
         round_trip = (
             localized.astimezone(dt_timezone.utc)
             .astimezone(zone)
             .replace(tzinfo=None)
         )
+
         if round_trip != local:
-            raise ValueError("Deadline falls in a nonexistent local time.")
+            raise ValueError(
+                "Deadline falls in a nonexistent local time."
+            )
+
     else:
         localized = local
-    return int(localized.astimezone(dt_timezone.utc).timestamp())
 
+    return int(
+        localized.astimezone(dt_timezone.utc).timestamp()
+    )
 
 def _format_due_at(due_at_utc: int | None) -> str:
     if due_at_utc is None:

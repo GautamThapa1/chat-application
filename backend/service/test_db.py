@@ -704,6 +704,45 @@ def test_task_deadline_update_reuses_pending_reminder(owners_db):
         conn.close()
 
 
+def test_relative_deadlines_preserve_explicit_local_times(owners_db):
+    from zoneinfo import ZoneInfo
+
+    user_id, _ = owners_db
+    assert db.set_user_timezone(user_id, "Asia/Kathmandu")
+    zone = ZoneInfo("Asia/Kathmandu")
+    today = datetime.now(zone).date()
+    examples = [
+        ("tomorrow at 3 PM", 1, "3:00 PM"),
+        ("tomorrow at 3:00 PM", 1, "3:00 PM"),
+        ("today at 9 AM", 0, "9:00 AM"),
+        ("today at 09:30 AM", 0, "9:30 AM"),
+        ("tomorrow at 15:00", 1, "3:00 PM"),
+        ("tomorrow", 1, "9:00 AM"),
+        ("tomorrow at 3:30 PM", 1, "3:30 PM"),
+    ]
+
+    for expression, day_offset, expected_time in examples:
+        task_id = db.create_task(
+            user_id,
+            "Afternoon meeting",
+            due_at_local=expression,
+        )
+        task = next(
+            task
+            for task in db.get_tasks(user_id)
+            if task["id"] == task_id
+        )
+        expected = datetime.combine(
+            today + timedelta(days=day_offset),
+            datetime.strptime(expected_time, "%I:%M %p").time(),
+            tzinfo=zone,
+        ).astimezone(timezone.utc)
+        assert task["due_at_utc"] == (
+            expected.isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        ), expression
+
+
 def test_timezone_change_migrates_legacy_date_only_tasks(owners_db):
     user_id, _ = owners_db
     conn = db.get_connection()
@@ -1130,3 +1169,102 @@ def test_stale_conversation_embedding_snapshot_is_rejected(owners_db):
 
     assert result is False
     assert db.get_conversation_embedding_index(user_a, conversation["id"]) == []
+
+def test_create_task_preserves_explicit_local_datetime(owners_db):
+    user_id, _ = owners_db
+
+    assert db.set_user_timezone(
+        user_id,
+        "Asia/Kathmandu"
+    )
+
+    task_id = db.create_task(
+        user_id,
+        "Exact time",
+        due_at_local="2099-12-01T10:30"
+    )
+
+    task = next(
+        task
+        for task in db.get_tasks(user_id)
+        if task["id"] == task_id
+    )
+
+    assert task["due_at_utc"] == "2099-12-01T04:45:00Z"
+
+def test_relative_task_deadlines_use_user_timezone_and_preserve_time(
+    owners_db
+):
+    user_id, _ = owners_db
+
+    assert db.set_user_timezone(
+        user_id,
+        "Asia/Kathmandu"
+    )
+
+    from zoneinfo import ZoneInfo
+
+    local_today = datetime.now(
+        ZoneInfo("Asia/Kathmandu")
+    ).date()
+
+    task_id = db.create_task(
+        user_id,
+        "Today at nine",
+        due_at_local="today at 9:00 AM"
+    )
+
+    task = next(
+        task
+        for task in db.get_tasks(user_id)
+        if task["id"] == task_id
+    )
+
+    expected = datetime.combine(
+        local_today,
+        datetime.min.time().replace(hour=9),
+        tzinfo=ZoneInfo("Asia/Kathmandu")
+    ).astimezone(timezone.utc)
+
+    assert task["due_at_utc"] == (
+        expected.isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+def test_relative_date_without_time_defaults_to_nine_am(owners_db):
+    user_id, _ = owners_db
+
+    assert db.set_user_timezone(
+        user_id,
+        "Asia/Kathmandu"
+    )
+
+    from zoneinfo import ZoneInfo
+
+    tomorrow = (
+        datetime.now(ZoneInfo("Asia/Kathmandu")).date()
+        + timedelta(days=1)
+    )
+
+    task_id = db.create_task(
+        user_id,
+        "Tomorrow",
+        due_at_local="tomorrow"
+    )
+
+    task = next(
+        task
+        for task in db.get_tasks(user_id)
+        if task["id"] == task_id
+    )
+
+    expected = datetime.combine(
+        tomorrow,
+        datetime.min.time().replace(hour=9),
+        tzinfo=ZoneInfo("Asia/Kathmandu")
+    ).astimezone(timezone.utc)
+
+    assert task["due_at_utc"] == (
+        expected.isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
