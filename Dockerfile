@@ -22,7 +22,15 @@ COPY pyproject.toml uv.lock ./
 # --frozen: install exactly what uv.lock says (fails if it is out of date).
 RUN uv sync --frozen --no-dev --no-install-project
 
-# ---------- Stage 2: small runtime image ----------
+# ---------- Stage 2: build the React frontend ----------
+FROM node:22-slim AS frontend
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build
+
+# ---------- Stage 3: small runtime image ----------
 FROM python:3.12-slim AS runtime
 
 # Run as an unprivileged user. /data is where the database volume is mounted.
@@ -34,7 +42,7 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY backend ./backend
 COPY shared_common ./shared_common
-COPY frontend ./frontend
+COPY --from=frontend /frontend/dist ./frontend/dist
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

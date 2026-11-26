@@ -84,10 +84,10 @@ app.include_router(memories.router)
 app.include_router(notes.router)
 app.include_router(reminders.router)
 
-# connect the frontend
+# connect the frontend: the Vite build output (run `npm run build` in frontend/)
 app.mount(
     "/",
-    StaticFiles(directory="frontend", html=True),
+    StaticFiles(directory="frontend/dist", html=True, check_dir=False),
     name="frontend",
 )
 

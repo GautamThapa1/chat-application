@@ -38,7 +38,7 @@ backend/
 ├── proto/           # Protocol Buffer definitions
 └── generated/       # Generated gRPC code
 
-frontend/            # Web interface
+frontend/            # Web interface (React + Vite)
 tests/               # Automated tests
 
 Makefile
@@ -182,7 +182,7 @@ Open [http://localhost:8000](http://localhost:8000).
 
 1. **Backend** — installs locked dependencies, checks the generated gRPC code
    matches `chat.proto` (`make proto`), and runs `pytest`.
-2. **Frontend** — runs the jsdom tests in `tests/frontend`.
+2. **Frontend** — runs the Vitest/jsdom tests in `frontend` and builds it.
 3. **Docker** — builds the image, smoke-tests its imports, and validates
    `compose.yaml`. Pushes to `main` and `v*` tags also publish the image to
    `ghcr.io/<owner>/<repo>`.
@@ -198,10 +198,13 @@ Run the test suite (set any `DATABASE_KEY` first, or put one in `.env`):
 DATABASE_KEY=test-key make test
 ```
 
-Frontend tests (needs Node 22):
+Frontend (React + Vite, needs Node 22):
 
 ```bash
-cd tests/frontend && npm ci && npm test
+cd frontend && npm ci
+npm test          # Vitest + jsdom
+npm run dev       # dev server on :5173, proxies /api and /ws to :8000
+npm run build     # writes frontend/dist, which FastAPI serves on :8000
 ```
 
 Regenerate gRPC files after modifying the Protocol Buffer definitions:
