@@ -176,6 +176,20 @@ Open [http://localhost:8000](http://localhost:8000).
 | `QDRANT_URL` | service | Qdrant address (default `http://localhost:6333`) |
 | `QDRANT_CONVERSATION_COLLECTION_PREFIX` | service | Optional conversation-vector collection prefix (default `note_embeddings_conversations`, derived from `QDRANT_COLLECTION_PREFIX`) |
 
+## ☁️ Production Deploy (Vercel + Render)
+
+The frontend and API live on subdomains of one domain (for example
+`app.example.com` and `api.example.com`). Because both are the same site, the
+`SameSite=Lax` session cookie works for the REST API and for the WebSocket.
+
+- **Render** (`render.yaml`): one Docker web service. `deploy/start.sh` runs the
+  gRPC ChatService on loopback and FastAPI on `$PORT`. SQLite is stored on a
+  persistent disk at `/data`. Keep it at one instance.
+- **Qdrant Cloud**: set `QDRANT_URL` and `QDRANT_API_KEY` on Render.
+- **Vercel**: root directory `frontend`, env `VITE_API_URL=https://api.example.com`.
+- On Render set `ALLOWED_ORIGINS=https://app.example.com` (used for both CORS
+  and the WebSocket origin check).
+
 ## 🔁 Continuous Integration
 
 `.github/workflows/ci.yml` runs on every pull request and push to `main`:

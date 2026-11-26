@@ -83,13 +83,18 @@ function decodeBase64Url(value) {
   return Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
 }
 
+// Where the backend lives. Empty = same origin as the page (local dev, Docker).
+// In production set VITE_API_URL (e.g. https://api.example.com) at build time.
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+
 async function api(path, method = "GET", body) {
-  const options = { method, headers: {} };
+  // "include" sends the session cookie to the API subdomain as well.
+  const options = { method, headers: {}, credentials: "include" };
   if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
   }
-  const response = await fetch(path, options);
+  const response = await fetch(`${API_BASE}${path}`, options);
   let data = null;
   try {
     data = await response.json();
@@ -101,9 +106,12 @@ async function api(path, method = "GET", body) {
 
 // ---------- The store ----------
 export function createChatStore() {
-  // Same host as the page, so the browser sends the session cookie. Becomes
-  // wss:// automatically once the site is served over HTTPS.
-  const wsUrl = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+  // The API host (or the page's host when API_BASE is empty), so the browser
+  // sends the session cookie. https -> wss automatically.
+  const wsUrl = () => {
+    const base = new URL(API_BASE || location.origin);
+    return `${base.protocol === "https:" ? "wss" : "ws"}://${base.host}/ws`;
+  };
 
   const listeners = new Set();
   let version = 0;

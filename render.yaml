@@ -1,0 +1,43 @@
+# Render Blueprint: one Docker web service running the gRPC ChatService and the
+# FastAPI app together (deploy/start.sh), with a persistent disk for SQLite.
+# Secrets marked `sync: false` are entered in the Render dashboard.
+services:
+  - type: web
+    name: chat-api
+    runtime: docker
+    plan: starter            # paid plan required for a persistent disk
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerCommand: ./deploy/start.sh
+    healthCheckPath: /api/health
+    numInstances: 1          # must stay 1 (SQLite + in-memory generations)
+    autoDeploy: true
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /data/app.db
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: ALLOWED_ORIGINS
+        sync: false          # e.g. https://app.example.com
+      - key: DATABASE_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: GEMINI_EMBEDDING_MODEL
+        value: gemini-embedding-001
+      - key: QDRANT_URL
+        sync: false          # Qdrant Cloud cluster URL
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false          # mailto:you@example.com

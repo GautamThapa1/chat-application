@@ -7,6 +7,7 @@ from pathlib import Path
 import grpc
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
@@ -60,6 +61,18 @@ async def default_rate_limit(request: Request, call_next):
     return await call_next(request)
 
 
+# Added last = outermost, so even 429s carry CORS headers. Lets the frontend on
+# another origin (e.g. app.example.com -> api.example.com) call the API with the
+# session cookie. Same allow-list as the WebSocket origin check.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=sorted(auth.ALLOWED_ORIGINS),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Content-Type"],
+)
+
+
 @app.websocket("/ws") # frontend connects here
 async def ws_chat(ws: WebSocket):
     user_id = await auth.authenticate_websocket(ws)
@@ -77,6 +90,12 @@ async def ws_chat(ws: WebSocket):
         user_id=user_id,
         revalidate_session=lambda: auth.authenticate_websocket(ws),
     )
+
+@app.get("/api/health", include_in_schema=False)
+async def health():
+    """Liveness probe for the hosting platform (no auth, no gRPC call)."""
+    return {"ok": True}
+
 
 app.include_router(auth.router)  # must come BEFORE the "/" static mount
 app.include_router(conversations.router)

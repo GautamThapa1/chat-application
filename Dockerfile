@@ -42,6 +42,7 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY backend ./backend
 COPY shared_common ./shared_common
+COPY deploy ./deploy
 COPY --from=frontend /frontend/dist ./frontend/dist
 
 ENV PATH="/app/.venv/bin:$PATH" \
