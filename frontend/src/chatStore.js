@@ -286,7 +286,14 @@ export function createChatStore() {
       await savePushSubscription(pushSubscription);
       setReminders({ enabled: true, status: "Task reminders are enabled on this device." });
     } catch (error) {
-      setReminders({ status: `Could not update task reminders: ${error.message}` });
+      // Chromium raises AbortError when its push service (FCM) is unreachable or
+      // disabled, e.g. Brave's default "Use Google services for push messaging" = off.
+      const status = error.name === "AbortError" && /push service/i.test(error.message)
+        ? "Your browser's push service is unavailable. In Brave, enable "
+          + "\"Use Google services for push messaging\" in brave://settings/privacy "
+          + "and restart the browser, or try another browser."
+        : `Could not update task reminders: ${error.message}`;
+      setReminders({ status });
     } finally {
       setReminders({ busy: false });
     }
