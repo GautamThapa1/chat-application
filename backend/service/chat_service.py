@@ -10,7 +10,8 @@ from contextlib import closing
 import grpc
 
 from backend.generated import chat_pb2, chat_pb2_grpc
-from backend.service import db, gemini_chat, memory_store
+from backend.service import db, memory_store
+from backend.service.gemini import runner as gemini_chat
 from backend.service.auth_interceptor import AuthInterceptor, current_user_id
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             )
             if cancelled.is_set():
                 raise GeneratorExit
-
+            # this is runner.py as gemini_chat, where all tool calls happens
             turn = gemini_chat.run_turn(
                 message,
                 self._gemini_client,

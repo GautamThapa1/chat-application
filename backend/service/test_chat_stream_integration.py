@@ -200,6 +200,7 @@ def test_real_grpc_stream_executes_save_note_tool_in_database(grpc_runtime):
     events = list(stub.StreamMessage(
         _request(conversation_id, request_id="save-note-request"),
         metadata=metadata,
+        timeout=5,
     ))
 
     tool_events = [
@@ -215,6 +216,36 @@ def test_real_grpc_stream_executes_save_note_tool_in_database(grpc_runtime):
         ("Plan", "Ship chat")
     ]
     assert events[-1].completed.full_text == "I saved the plan."
+
+
+def test_real_grpc_stream_executes_multiple_tools_sequentially(grpc_runtime):
+    user_id, _, conversation_id, metadata, start_server = grpc_runtime
+    client = _Client(
+        [
+            _tool_call("save_note", {"title": "First", "content": "One"}),
+            _tool_call("save_note", {"title": "Second", "content": "Two"}),
+        ],
+        generated=[_text_response("Both notes are saved.")],
+    )
+    stub = start_server(client)
+
+    events = list(stub.StreamMessage(
+        _request(conversation_id, request_id="multiple-tools-request"),
+        metadata=metadata,
+        timeout=5,
+    ))
+
+    tool_results = [
+        json.loads(event.tool_result.result_json)
+        for event in events
+        if event.WhichOneof("payload") == "tool_result"
+    ]
+    assert [result["title"] for result in tool_results] == ["First", "Second"]
+    assert [
+        (note["title"], note["content"])
+        for note in db.search_notes(user_id, "")
+    ] == [("First", "One"), ("Second", "Two")]
+    assert events[-1].completed.full_text == "Both notes are saved."
 
 
 def test_invalid_api_key_is_reported_as_an_in_band_grpc_error(grpc_runtime):

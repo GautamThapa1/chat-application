@@ -848,15 +848,16 @@ def run_turn(
     user_id: int,
     request_id: str,
 ) -> Iterator[TurnEvent]:
-    """Yield text chunks, tool results, and a final response synchronously."""
+    """Yield text chunks, tool results, and a final response synchronously.
+    Sends the tool response back to Gemini"""
     contents = bounded_contents_sync(message, gemini_client, model, history)
     stream = gemini_client.models.generate_content_stream(
         model=model,
         contents=contents,
         config=TOOL_CONFIG,
     )
-    parts = []
-    calls = []
+    parts = [] # All content parts returned by Gemini, including text and function calls.
+    calls = [] # Only the function calls requested by Gemini.
     with closing(stream):
         for chunk in stream:
             candidates = chunk.candidates or []
@@ -872,6 +873,7 @@ def run_turn(
     if not calls:
         return
 
+    # Creating the model response content for history
     content = types.Content(role="model", parts=parts)
     confirmation_token = secrets.token_urlsafe(8)
     confirmation_prompt = None
@@ -880,6 +882,8 @@ def run_turn(
             raise ValueError("Gemini requested too many tools at once.")
         contents.append(content)
         tool_responses = []
+
+        # Executing the tools
         for call_index, call in enumerate(calls):
             if not call.name:
                 raise ValueError("Gemini returned a tool call without a name.")
