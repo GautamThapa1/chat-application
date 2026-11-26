@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from backend.orchestrator.grpc_session import SessionStub
+from shared_common.common.log import trace_context
 
 
 @pytest.mark.asyncio
@@ -28,4 +29,18 @@ async def test_extra_keyword_arguments_are_passed_through():
 
     raw_stub.ListTasks.assert_awaited_once_with(
         "req", metadata=(("session-token", "tok"),), timeout=5
+    )
+
+
+@pytest.mark.asyncio
+async def test_trace_id_is_added_to_call_metadata():
+    raw_stub = type("Stub", (), {})()
+    raw_stub.StreamMessage = AsyncMock()
+
+    with trace_context("trace-123"):
+        await SessionStub(raw_stub, "tok").StreamMessage("request")
+
+    raw_stub.StreamMessage.assert_awaited_once_with(
+        "request",
+        metadata=(("session-token", "tok"), ("x-trace-id", "trace-123")),
     )

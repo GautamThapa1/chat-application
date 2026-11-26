@@ -33,6 +33,7 @@ RUN useradd --create-home --uid 10001 app \
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY backend ./backend
+COPY shared_common ./shared_common
 COPY frontend ./frontend
 
 ENV PATH="/app/.venv/bin:$PATH" \

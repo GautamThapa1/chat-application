@@ -9,6 +9,7 @@ from fastapi import WebSocketDisconnect
 from backend.generated import chat_pb2
 from backend.orchestrator import websocket as websocket_module
 from backend.orchestrator.websocket import hub
+from shared_common.common.log import get_trace_id
 
 
 class FakeWebSocket:
@@ -80,6 +81,7 @@ class FakeStub:
     def __init__(self, stream_factory=None):
         self.requests = []
         self.calls = []
+        self.trace_ids = []
         if stream_factory is None:
             stream_factory = lambda request: events(
                 started(), chunk("ok", 0), completed("ok")
@@ -87,6 +89,7 @@ class FakeStub:
 
         def stream_message(request):
             self.requests.append(request)
+            self.trace_ids.append(get_trace_id())
             call = FakeCall(stream_factory(request))
             self.calls.append(call)
             return call
@@ -467,3 +470,25 @@ async def test_conversation_is_released_after_completion():
     websocket.disconnect()
     await asyncio.wait_for(task, timeout=1)
     await wait_until(lambda: hub.get(1, 3) is None)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_generations_have_independent_trace_ids():
+    stub = FakeStub()
+    websocket = LiveWebSocket()
+    task = start_endpoint(websocket, stub)
+    websocket.push(json.loads(create_message(
+        "first", "r1", conversation_id=3,
+    )))
+    websocket.push(json.loads(create_message(
+        "second", "r2", conversation_id=4,
+    )))
+
+    await wait_until(lambda: len(stub.trace_ids) == 2)
+    assert len(set(stub.trace_ids)) == 2
+    assert "-" not in stub.trace_ids
+
+    websocket.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+    await wait_until(lambda: hub.get(1, 3) is None and hub.get(1, 4) is None)
+    assert get_trace_id() == "-"

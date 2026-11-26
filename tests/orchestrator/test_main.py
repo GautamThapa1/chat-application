@@ -28,10 +28,13 @@ async def test_lifespan_initializes_and_cleans_up(monkeypatch):
         "ChatServiceStub",
         fake_stub_factory,
     )
+    setup_logging = Mock()
+    monkeypatch.setattr(main, "setup_logging", setup_logging)
 
     app = FastAPI()
 
     async with main.lifespan(app):
+        setup_logging.assert_called_once_with("orchestrator")
         assert app.state.grpc_stub is fake_stub
 
         fake_channel_factory.assert_called_once_with("service:50051")

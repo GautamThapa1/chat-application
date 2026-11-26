@@ -5,9 +5,11 @@ from contextvars import ContextVar
 import grpc
 
 from backend.service import db
+from shared_common.common.log import trace_context
 
 # Must match the key the orchestrator sends (backend/orchestrator/grpc_session.py).
 SESSION_METADATA_KEY = "session-token"
+TRACE_METADATA_KEY = "x-trace-id"
 
 # RPCs callable without a session. Anything NOT listed here requires one, so a
 # new RPC added later is protected automatically.
@@ -48,19 +50,20 @@ class AuthInterceptor(grpc.ServerInterceptor):
 
             def authenticated_stream(request, context):
                 metadata = dict(context.invocation_metadata())
-                user_id = db.get_session_user(
-                    metadata.get(SESSION_METADATA_KEY, "")
-                )
-                if user_id is None:
-                    context.abort(
-                        grpc.StatusCode.UNAUTHENTICATED,
-                        "Missing or invalid session.",
+                with trace_context(metadata.get(TRACE_METADATA_KEY) or "-"):
+                    user_id = db.get_session_user(
+                        metadata.get(SESSION_METADATA_KEY, "")
                     )
-                reset = _current_user.set(user_id)
-                try:
-                    yield from inner(request, context)
-                finally:
-                    _current_user.reset(reset)
+                    if user_id is None:
+                        context.abort(
+                            grpc.StatusCode.UNAUTHENTICATED,
+                            "Missing or invalid session.",
+                        )
+                    reset = _current_user.set(user_id)
+                    try:
+                        yield from inner(request, context)
+                    finally:
+                        _current_user.reset(reset)
 
             return grpc.unary_stream_rpc_method_handler(
                 authenticated_stream,
@@ -81,16 +84,17 @@ class AuthInterceptor(grpc.ServerInterceptor):
             # Runs on the worker thread, so a slow DB lookup does not block
             # gRPC's dispatch loop.
             metadata = dict(context.invocation_metadata())
-            user_id = db.get_session_user(metadata.get(SESSION_METADATA_KEY, ""))
-            if user_id is None:
-                context.abort(
-                    grpc.StatusCode.UNAUTHENTICATED, "Missing or invalid session."
-                )
-            reset = _current_user.set(user_id)
-            try:
-                return inner(request, context)
-            finally:
-                _current_user.reset(reset)
+            with trace_context(metadata.get(TRACE_METADATA_KEY) or "-"):
+                user_id = db.get_session_user(metadata.get(SESSION_METADATA_KEY, ""))
+                if user_id is None:
+                    context.abort(
+                        grpc.StatusCode.UNAUTHENTICATED, "Missing or invalid session."
+                    )
+                reset = _current_user.set(user_id)
+                try:
+                    return inner(request, context)
+                finally:
+                    _current_user.reset(reset)
 
         return grpc.unary_unary_rpc_method_handler(
             authenticated,

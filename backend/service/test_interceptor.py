@@ -1,11 +1,13 @@
 """The service must reject unauthenticated calls and know who is calling."""
 
 import socket
+from concurrent import futures
 
 import grpc
 import pytest
 
 from backend.embeddings import note_content_hash
+from backend.orchestrator.grpc_session import SessionStub
 import backend.service.db as db
 from backend.generated import chat_pb2, chat_pb2_grpc
 from backend.service import auth_interceptor, chat_service
@@ -14,6 +16,7 @@ from backend.service.auth_interceptor import (
     AuthInterceptor,
     current_user_id,
 )
+from shared_common.common.log import get_trace_id, trace_context
 
 
 @pytest.fixture
@@ -450,8 +453,10 @@ def test_public_methods_work_without_a_token(stub):
 
 
 class _FakeContext:
-    def __init__(self, token):
+    def __init__(self, token, trace_id=None):
         self._metadata = ((SESSION_METADATA_KEY, token),)
+        if trace_id is not None:
+            self._metadata += (("x-trace-id", trace_id),)
 
     def invocation_metadata(self):
         return self._metadata
@@ -494,9 +499,9 @@ def test_unary_stream_handler_keeps_authenticated_user_for_generator_lifetime(
     seen = []
 
     def inner(request, context):
-        seen.append(current_user_id())
+        seen.append((current_user_id(), get_trace_id()))
         yield "first"
-        seen.append(current_user_id())
+        seen.append((current_user_id(), get_trace_id()))
         yield "second"
 
     details = type("D", (), {"method": "/chat.ChatService/StreamMessage"})()
@@ -504,13 +509,58 @@ def test_unary_stream_handler_keeps_authenticated_user_for_generator_lifetime(
         lambda _: grpc.unary_stream_rpc_method_handler(inner), details
     )
 
-    assert list(handler.unary_stream(object(), _FakeContext(token))) == [
+    assert list(handler.unary_stream(
+        object(), _FakeContext(token, "trace-stream")
+    )) == [
         "first",
         "second",
     ]
-    assert seen == [user_id, user_id]
+    assert seen == [(user_id, "trace-stream"), (user_id, "trace-stream")]
     with pytest.raises(RuntimeError):
         current_user_id()
+    assert get_trace_id() == "-"
+
+
+def test_trace_context_resets_after_exit():
+    assert get_trace_id() == "-"
+    with trace_context("trace-test"):
+        assert get_trace_id() == "trace-test"
+    assert get_trace_id() == "-"
+
+
+def test_trace_id_crosses_grpc_stream_and_resets(monkeypatch):
+    observed = []
+    monkeypatch.setattr(db, "get_session_user", lambda token: 1)
+
+    class TraceServicer(chat_pb2_grpc.ChatServiceServicer):
+        def StreamMessage(self, request, context):
+            observed.append(get_trace_id())
+            yield chat_pb2.ChatEvent(started=chat_pb2.Started())
+            observed.append(get_trace_id())
+
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=1),
+        interceptors=[AuthInterceptor()],
+    )
+    chat_pb2_grpc.add_ChatServiceServicer_to_server(TraceServicer(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+    stub = SessionStub(chat_pb2_grpc.ChatServiceStub(channel), "session")
+    try:
+        with trace_context("trace-roundtrip"):
+            list(stub.StreamMessage(chat_pb2.ChatTurnRequest()))
+        list(stub.StreamMessage(chat_pb2.ChatTurnRequest()))
+    finally:
+        channel.close()
+        server.stop(grace=None)
+
+    assert observed == [
+        "trace-roundtrip",
+        "trace-roundtrip",
+        "-",
+        "-",
+    ]
 
 
 def test_unknown_methods_are_protected_by_default():

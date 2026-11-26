@@ -26,6 +26,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from backend.generated import chat_pb2
 from backend.orchestrator.rate_limit import message_limit_retry_after
+from shared_common.common.log import trace_context
 
 log = logging.getLogger("orchestrator")
 _GENERIC_CHAT_ERROR = "Something went wrong. Please try again."
@@ -172,6 +173,23 @@ hub = GenerationHub()
 
 
 async def _run_generation(
+    gen: Generation,
+    stub,
+    message: str,
+    *,
+    message_id: int | None = None,
+) -> None:
+    with trace_context():
+        log.info("Starting chat generation")
+        await _run_generation_with_trace(
+            gen,
+            stub,
+            message,
+            message_id=message_id,
+        )
+
+
+async def _run_generation_with_trace(
     gen: Generation,
     stub,
     message: str,

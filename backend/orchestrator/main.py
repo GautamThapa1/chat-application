@@ -20,6 +20,7 @@ from backend.orchestrator import auth, conversations, memories, notes, reminders
 from backend.orchestrator.grpc_session import SessionStub
 from backend.orchestrator.rate_limit import default_limit_retry_after, limiter
 from backend.orchestrator.websocket import websocket_endpoint
+from shared_common.common.log import setup_logging
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 levels above
 
@@ -28,6 +29,7 @@ DEFAULT_GRPC_TARGET = "127.0.0.1:50051"
 
 @asynccontextmanager # before yield setup and yield cleanup
 async def lifespan(app: FastAPI): # lifespan: manages the gRPC object and channel
+    setup_logging("orchestrator")
     grpc_target = os.getenv("GRPC_TARGET", DEFAULT_GRPC_TARGET)
     channel = grpc.aio.insecure_channel(grpc_target) # TODO: make it secure later for production
     app.state.grpc_stub = chat_pb2_grpc.ChatServiceStub(channel) # stub object of orchestrator

@@ -13,6 +13,8 @@ from backend.generated import chat_pb2, chat_pb2_grpc
 from backend.service import db, gemini_chat, memory_store
 from backend.service.auth_interceptor import AuthInterceptor, current_user_id
 
+logger = logging.getLogger(__name__)
+
 
 class _ConversationMessageNotFound(LookupError):
     pass
@@ -127,6 +129,8 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "assistant_message_id must be a positive integer.",
             )
+
+        logger.info("StreamMessage started")
 
         try:
             message, history, replace_assistant_id = _load_history_for_mode(

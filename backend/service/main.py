@@ -15,8 +15,10 @@ from backend.service.task_reminder_worker import TaskReminderWorker
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    from shared_common.common.log import setup_logging
+
+    setup_logging("chat-service")
     init_db()
 
     api_key = os.getenv("GEMINI_API_KEY")
