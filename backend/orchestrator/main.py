@@ -75,20 +75,19 @@ app.add_middleware(
 
 @app.websocket("/ws") # frontend connects here
 async def ws_chat(ws: WebSocket):
-    user_id = await auth.authenticate_websocket(ws)
-    if user_id is None:
+    # Cookie (same site) or single-use ?ticket= (frontend on another site).
+    token = auth.websocket_session_token(ws)
+    user_id = await auth.authenticate_websocket(ws, token)
+    if user_id is None or not token:
         # Closing BEFORE accept() makes the handshake fail with HTTP 403.
         await ws.close(code=1008)  # 1008 = policy violation
         return
-    stub = SessionStub(
-        ws.app.state.grpc_stub,
-        ws.cookies[auth.SESSION_COOKIE],
-    )
+    stub = SessionStub(ws.app.state.grpc_stub, token)
     await websocket_endpoint(
         ws,
         stub,
         user_id=user_id,
-        revalidate_session=lambda: auth.authenticate_websocket(ws),
+        revalidate_session=lambda: auth.authenticate_websocket(ws, token),
     )
 
 @app.get("/api/health", include_in_schema=False)

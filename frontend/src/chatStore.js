@@ -86,6 +86,11 @@ function decodeBase64Url(value) {
 // Where the backend lives. Empty = same origin as the page (local dev, Docker).
 // In production set VITE_API_URL (e.g. https://api.example.com) at build time.
 const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+// Set when the WebSocket host is on another site than the page (e.g. page on
+// *.vercel.app with /api proxied, socket straight to wss://*.onrender.com/ws).
+// The browser will not send the cookie there, so we first fetch a single-use
+// ticket through the proxied API and pass it in the URL.
+const WS_URL = (import.meta.env.VITE_WS_URL || "").replace(/\/+$/, "");
 
 async function api(path, method = "GET", body) {
   // "include" sends the session cookie to the API subdomain as well.
@@ -109,6 +114,7 @@ export function createChatStore() {
   // The API host (or the page's host when API_BASE is empty), so the browser
   // sends the session cookie. https -> wss automatically.
   const wsUrl = () => {
+    if (WS_URL) return WS_URL;
     const base = new URL(API_BASE || location.origin);
     return `${base.protocol === "https:" ? "wss" : "ws"}://${base.host}/ws`;
   };
@@ -471,10 +477,41 @@ export function createChatStore() {
     return true;
   }
 
-  function connectWebSocket() {
-    if (!signedIn || ws) return;
+  let ticketPending = false;
+
+  function scheduleReconnect() {
+    const delay = reconnectDelayMs(reconnectAttempt++);
+    setConnection(`Reconnecting in ${Math.ceil(delay / 1000)}s…`, "error");
+    reconnectTimer = setTimeout(connectWebSocket, delay);
+  }
+
+  async function connectWebSocket() {
+    if (!signedIn || ws || ticketPending) return;
     const generation = userStateGeneration;
-    const socket = new WebSocket(wsUrl());
+    let url = wsUrl();
+    if (WS_URL) {
+      ticketPending = true;
+      setConnection("Connecting…", "");
+      let result = null;
+      try {
+        result = await api("/api/ws-ticket", "POST");
+      } catch {
+        // Server unreachable (e.g. waking up): retry below.
+      } finally {
+        ticketPending = false;
+      }
+      if (generation !== userStateGeneration || !signedIn || ws) return;
+      if (result?.status === 401) {
+        showAuth("Your session has ended. Please log in again.");
+        return;
+      }
+      if (!result?.ok || !result.data?.ticket) {
+        scheduleReconnect();
+        return;
+      }
+      url = `${WS_URL}?ticket=${encodeURIComponent(result.data.ticket)}`;
+    }
+    const socket = new WebSocket(url);
     ws = socket;
     setConnection("Connecting…", "");
 
@@ -508,9 +545,7 @@ export function createChatStore() {
         // Server unreachable: keep retrying.
       }
       if (generation !== userStateGeneration) return;
-      const delay = reconnectDelayMs(reconnectAttempt++);
-      setConnection(`Reconnecting in ${Math.ceil(delay / 1000)}s…`, "error");
-      reconnectTimer = setTimeout(connectWebSocket, delay);
+      scheduleReconnect();
     }
 
     socket.onclose = handleClose;

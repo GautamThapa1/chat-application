@@ -6,6 +6,8 @@ HttpOnly cookie, so browser JavaScript never sees it.
 
 import logging
 import os
+import secrets
+import time
 
 import grpc
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
@@ -129,9 +131,60 @@ async def me(request: Request):
         raise HTTPException(status_code=401, detail="Not logged in.")
     return {"user_id": result.user_id, "username": result.username}
 
+# ---------- WebSocket tickets ----------
+# When the frontend is on another site (e.g. *.vercel.app -> *.onrender.com),
+# the browser will not send the session cookie on the WebSocket handshake.
+# The page instead asks (through the same-site /api proxy, cookie included) for
+# a short-lived, single-use ticket and puts it in the socket URL. Tickets live
+# in this process's memory, which is fine because the app runs ONE worker.
+WS_TICKET_TTL_SECONDS = 30
+_ws_tickets: dict[str, tuple[str, float]] = {}  # ticket -> (session token, expiry)
+
+
+def _prune_ws_tickets(now: float) -> None:
+    for ticket, (_, expires) in list(_ws_tickets.items()):
+        if expires <= now:
+            _ws_tickets.pop(ticket, None)
+
+
+def issue_ws_ticket(session_token: str) -> str:
+    now = time.monotonic()
+    _prune_ws_tickets(now)
+    ticket = secrets.token_urlsafe(32)
+    _ws_tickets[ticket] = (session_token, now + WS_TICKET_TTL_SECONDS)
+    return ticket
+
+
+def redeem_ws_ticket(ticket: str) -> str | None:
+    """Return the session token for a valid ticket and consume it."""
+    entry = _ws_tickets.pop(ticket, None)
+    if entry is None:
+        return None
+    session_token, expires = entry
+    return session_token if expires > time.monotonic() else None
+
+
+@router.post("/ws-ticket")
+async def ws_ticket(request: Request):
+    await me(request)  # 401 unless the cookie holds a valid session
+    return {"ticket": issue_ws_ticket(request.cookies[SESSION_COOKIE])}
+
+
+def websocket_session_token(ws: WebSocket) -> str | None:
+    """Session token for a handshake: a redeemed ?ticket=, else the cookie."""
+    query = getattr(ws, "query_params", None) or {}
+    ticket = query.get("ticket")
+    if ticket:
+        return redeem_ws_ticket(ticket)
+    return (getattr(ws, "cookies", None) or {}).get(SESSION_COOKIE)
+
+
 # this authenticate the websocket to see if it is allowed from the ALLOWED ORIGINS
-async def authenticate_websocket(ws: WebSocket) -> int | None:
-    """Return the user_id for a handshake that may proceed, else None."""
+async def authenticate_websocket(ws: WebSocket, token: str | None = None) -> int | None:
+    """Return the user_id for a handshake that may proceed, else None.
+
+    `token` is the session token to check; by default the cookie's.
+    """
     origin = ws.headers.get("origin")
     # No Origin header = not a browser (curl, scripts). Those can't ride on a
     # victim's cookie, and still need a valid session below.
@@ -139,7 +192,8 @@ async def authenticate_websocket(ws: WebSocket) -> int | None:
         log.warning("WebSocket rejected: origin %r not allowed", origin)
         return None
 
-    token = ws.cookies.get(SESSION_COOKIE)
+    if token is None:
+        token = ws.cookies.get(SESSION_COOKIE)
     if not token:
         return None
     try:

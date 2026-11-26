@@ -17,6 +17,7 @@ dependencies = [
     "slowapi>=0.1.10",
     "sqlcipher3-binary>=0.6.0",
     "uvicorn[standard]>=0.54.0",
+    "boto3>=1.35,<2",
 ]
 
 [dependency-groups]

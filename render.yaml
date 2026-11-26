@@ -1,28 +1,27 @@
-# Render Blueprint: one Docker web service running the gRPC ChatService and the
-# FastAPI app together (deploy/start.sh), with a persistent disk for SQLite.
-# Secrets marked `sync: false` are entered in the Render dashboard.
+# Render Blueprint — FREE plan only (no disk, no paid add-ons).
+#
+# One Docker web service runs the gRPC ChatService and the FastAPI app together
+# (deploy/start.sh). The free filesystem is wiped on every deploy/restart/
+# spin-down, so the encrypted SQLite file is restored from and backed up to
+# free S3-compatible storage (Backblaze B2) by backend/service/db_backup.py.
+# Secrets marked `sync: false` are typed into the Render dashboard.
 services:
   - type: web
-    name: chat-api
+    name: chat-application-api
     runtime: docker
-    plan: starter            # paid plan required for a persistent disk
+    plan: free
     region: oregon
     dockerfilePath: ./Dockerfile
     dockerCommand: ./deploy/start.sh
     healthCheckPath: /api/health
-    numInstances: 1          # must stay 1 (SQLite + in-memory generations)
     autoDeploy: true
-    disk:
-      name: data
-      mountPath: /data
-      sizeGB: 1
     envVars:
       - key: DB_PATH
         value: /data/app.db
       - key: COOKIE_SECURE
         value: "true"
       - key: ALLOWED_ORIGINS
-        sync: false          # e.g. https://app.example.com
+        sync: false          # https://<your-project>.vercel.app
       - key: DATABASE_KEY
         sync: false
       - key: GEMINI_API_KEY
@@ -32,7 +31,7 @@ services:
       - key: GEMINI_EMBEDDING_MODEL
         value: gemini-embedding-001
       - key: QDRANT_URL
-        sync: false          # Qdrant Cloud cluster URL
+        sync: false          # https://<cluster>.cloud.qdrant.io:6333
       - key: QDRANT_API_KEY
         sync: false
       - key: VAPID_PUBLIC_KEY
@@ -41,3 +40,16 @@ services:
         sync: false
       - key: VAPID_SUBJECT
         sync: false          # mailto:you@example.com
+      # Database backup (Backblaze B2 free tier, S3-compatible API)
+      - key: BACKUP_S3_BUCKET
+        sync: false
+      - key: BACKUP_S3_ENDPOINT
+        sync: false          # https://s3.<region>.backblazeb2.com
+      - key: BACKUP_S3_REGION
+        sync: false          # e.g. us-west-004
+      - key: BACKUP_S3_KEY_ID
+        sync: false
+      - key: BACKUP_S3_SECRET
+        sync: false
+      - key: BACKUP_INTERVAL_SECONDS
+        value: "60"

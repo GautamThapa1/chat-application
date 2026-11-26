@@ -22,12 +22,14 @@ afterEach(() => {
 const tick = (ms = 5) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
 
 /** Boot the page with a fake backend. `db` plays the database. */
-async function boot({ username = "Gautam", db } = {}) {
+async function boot({ username = "Gautam", db, modules } = {}) {
+  const { App: AppComponent = App, createChatStore: makeStore = createChatStore, StoreContext: Context = StoreContext } = modules || {};
   const sockets = [];
 
   class FakeWebSocket {
     static OPEN = 1;
-    constructor() {
+    constructor(url) {
+      this.url = url;
       this.readyState = 0;
       this.sent = [];
       this.closed = false;
@@ -70,6 +72,10 @@ async function boot({ username = "Gautam", db } = {}) {
   vi.stubGlobal("fetch", (path, options = {}) => {
     const method = options.method || "GET";
     if (path === "/api/me") return json({ user_id: 1, username });
+    if (path === "/api/ws-ticket" && method === "POST") {
+      db.ticketsIssued = (db.ticketsIssued || 0) + 1;
+      return json({ ticket: `t-${db.ticketsIssued}` });
+    }
     if (path === "/api/conversations/search" && method === "POST") {
       return json({ results: db.searchResults || [] });
     }
@@ -103,12 +109,12 @@ async function boot({ username = "Gautam", db } = {}) {
     return json({ detail: "not found" }, 404);
   });
 
-  const store = createChatStore();
+  const store = makeStore();
   stores.push(store);
   render(
-    <StoreContext.Provider value={store}>
-      <App />
-    </StoreContext.Provider>,
+    <Context.Provider value={store}>
+      <AppComponent />
+    </Context.Provider>,
   );
   await act(() => store.actions.checkSession());
   await tick(20);
@@ -506,4 +512,25 @@ test("semantic search shows conversation chunk previews and opens the selected c
   await tick(20);
   assert.match(page.threadText(), /question B/);
   assert.equal(page.$$(".conversation-search-result").length, 0);
+});
+
+test("with VITE_WS_URL the socket connects to that host with a fresh single-use ticket", async () => {
+  vi.stubEnv("VITE_WS_URL", "wss://api.example.onrender.com/ws");
+  vi.resetModules();
+  const modules = {
+    App: (await import("./App.jsx")).default,
+    createChatStore: (await import("./chatStore.js")).createChatStore,
+    StoreContext: (await import("./StoreContext.js")).StoreContext,
+  };
+  try {
+    const page = await boot({ modules });
+    assert.equal(page.socket.url, "wss://api.example.onrender.com/ws?ticket=t-1");
+
+    page.socket.close(); // server dropped us: reconnect must use a NEW ticket
+    await tick(1500);
+    assert.equal(page.socket.url, "wss://api.example.onrender.com/ws?ticket=t-2");
+  } finally {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  }
 });

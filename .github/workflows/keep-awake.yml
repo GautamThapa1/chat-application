@@ -1,0 +1,25 @@
+# Render Free spins a web service down after 15 minutes without traffic, which
+# would pause task reminders and drop WebSockets. Ping the health endpoint.
+# Free for public repositories. Set the repository variable BACKEND_HEALTH_URL
+# (Settings -> Secrets and variables -> Actions -> Variables) to enable it.
+# GitHub may delay scheduled runs, so an external pinger (cron-job.org /
+# UptimeRobot, both free) every 5-10 minutes is the more reliable primary.
+name: Keep backend awake
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    if: vars.BACKEND_HEALTH_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping health endpoint
+        env:
+          URL: ${{ vars.BACKEND_HEALTH_URL }}
+        run: curl -fsS --retry 5 --retry-delay 15 --max-time 100 "$URL"

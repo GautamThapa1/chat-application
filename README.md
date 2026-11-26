@@ -176,19 +176,28 @@ Open [http://localhost:8000](http://localhost:8000).
 | `QDRANT_URL` | service | Qdrant address (default `http://localhost:6333`) |
 | `QDRANT_CONVERSATION_COLLECTION_PREFIX` | service | Optional conversation-vector collection prefix (default `note_embeddings_conversations`, derived from `QDRANT_COLLECTION_PREFIX`) |
 
-## ☁️ Production Deploy (Vercel + Render)
+## ☁️ Free Deploy (Vercel + Render + Qdrant Cloud + Backblaze B2)
 
-The frontend and API live on subdomains of one domain (for example
-`app.example.com` and `api.example.com`). Because both are the same site, the
-`SameSite=Lax` session cookie works for the REST API and for the WebSocket.
+Everything runs on free tiers ($0, no credit card):
 
-- **Render** (`render.yaml`): one Docker web service. `deploy/start.sh` runs the
-  gRPC ChatService on loopback and FastAPI on `$PORT`. SQLite is stored on a
-  persistent disk at `/data`. Keep it at one instance.
-- **Qdrant Cloud**: set `QDRANT_URL` and `QDRANT_API_KEY` on Render.
-- **Vercel**: root directory `frontend`, env `VITE_API_URL=https://api.example.com`.
-- On Render set `ALLOWED_ORIGINS=https://app.example.com` (used for both CORS
-  and the WebSocket origin check).
+| Part | Host | Notes |
+|------|------|-------|
+| Frontend | Vercel Hobby (`frontend/`, `vercel.json`) | `/api/*` is proxied to Render, so the session cookie is first-party on `*.vercel.app` |
+| API + gRPC service | Render Free (`render.yaml`) | `deploy/start.sh` runs both processes in one container |
+| Database | SQLite (SQLCipher) + Backblaze B2 | Render Free has no disk: `backend/service/db_backup.py` restores the encrypted file on start and uploads a snapshot every 60 s and on shutdown |
+| Vectors | Qdrant Cloud Free | `QDRANT_URL`, `QDRANT_API_KEY` |
+
+- **WebSocket:** Vercel cannot proxy WebSockets, so the page fetches a 30-second,
+  single-use ticket from `POST /api/ws-ticket` (through the proxy, cookie
+  included) and connects straight to `wss://<render>/ws?ticket=…`. Set
+  `VITE_WS_URL=wss://<render-host>/ws` on Vercel and
+  `ALLOWED_ORIGINS=https://<project>.vercel.app` on Render.
+- **Spin-down:** Render Free sleeps after 15 idle minutes, which would pause task
+  reminders. Ping `/api/health` every 5–10 minutes (cron-job.org or UptimeRobot,
+  plus `.github/workflows/keep-awake.yml` with repo variable `BACKEND_HEALTH_URL`).
+  One service running all month stays within Render's 750 free hours.
+- **Data loss window:** at most the last ~60 s of writes if the container
+  crashes without a clean shutdown.
 
 ## 🔁 Continuous Integration
 
