@@ -7,7 +7,7 @@
 # Secrets marked `sync: false` are typed into the Render dashboard.
 services:
   - type: web
-    name: chat-application-api
+    name: chat-application-api   # live URL: https://chat-application-api-m2n9.onrender.com
     runtime: docker
     plan: free
     region: oregon

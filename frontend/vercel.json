@@ -7,7 +7,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://chat-application-api.onrender.com/api/:path*"
+      "destination": "https://chat-application-api-m2n9.onrender.com/api/:path*"
     }
   ],
   "headers": [
