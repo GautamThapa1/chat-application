@@ -108,9 +108,11 @@ async function boot({ username = "Gautam", db, modules, signedOut = false, holds
     const match = path.match(/^\/api\/conversations\/(\d+)$/);
     if (match && method === "GET") {
       const id = Number(match[1]);
+      if (db.failLoad) return json({ detail: "Service temporarily unavailable." }, 503);
       return json({
         conversation: db.conversations.find((c) => c.conversation_id === id),
-        messages: db.messages[id] || [],
+        // A real response is a fresh copy, never the "database" array itself.
+        messages: structuredClone(db.messages[id] || []),
       });
     }
     if (path === "/api/conversations" && method === "POST") {
@@ -652,4 +654,187 @@ test("a failed logout is reported on the login screen", async () => {
   await tick(20);
 
   assert.match(page.$("#auth-error").textContent, /Could not end the server session/);
+});
+
+/** Send a message in Chat A and return its request id. */
+async function sendInChatA(page, text = "hello") {
+  await page.open("Chat A");
+  await page.send(text);
+  return page.socket.sentOfType("message").at(-1).request_id;
+}
+
+/** Drop the connection and wait until the page has opened a new socket. */
+async function reconnect(page) {
+  const before = page.sockets.length;
+  page.socket.close();
+  for (let i = 0; i < 80 && page.sockets.length === before; i++) await tick(50);
+  await tick(20);
+}
+
+const memoryEvent = (request_id) => ({
+  type: "tool_result", conversation_id: 1, request_id, index: 0, tool: "save_memory",
+  result: { memory_id: 42, title: "Answer style", content: "Concise.", status: "🧠 Memory saved" },
+});
+
+const comesAfter = (later, earlier) => Boolean(
+  earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING,
+);
+
+test("the memory card stays below the reply while it streams and after it finishes", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page);
+  page.socket.serverSend(memoryEvent(request_id));
+  page.socket.serverSend({ type: "chunk", conversation_id: 1, request_id, content: "Noted", offset: 0 });
+  const reply = () => page.$$(".message.assistant").at(-1);
+
+  assert.ok(comesAfter(page.$(".tool-results"), reply()), "below while streaming");
+
+  page.db.messages[1].push(
+    { message_id: 13, conversation_id: 1, role: "user", content: "hello" },
+    { message_id: 14, conversation_id: 1, role: "assistant", content: "Noted" },
+  );
+  page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
+  await tick(20);
+  assert.ok(comesAfter(page.$(".tool-results"), reply()), "below after finishing");
+});
+
+test("only the live question and reply animate in, so finishing does not flicker", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page);
+  assert.equal(page.$$(".message.live").length, 2);
+
+  page.db.messages[1].push(
+    { message_id: 13, conversation_id: 1, role: "user", content: "hello" },
+    { message_id: 14, conversation_id: 1, role: "assistant", content: "Hi" },
+  );
+  page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
+  await tick(20);
+  assert.equal(page.$$(".message.live").length, 0);
+  assert.equal(page.$("#input").value, "", "a saved prompt is not put back");
+});
+
+test("stopping before anything is saved puts the message back in the box", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page, "keep me");
+  page.socket.serverSend({ type: "cancelled", conversation_id: 1, request_id });
+  await tick(20);
+
+  assert.equal(page.$("#input").value, "keep me");
+  assert.match(page.$(".notice").textContent, /Stopped\. Your message is back in the box/);
+});
+
+test("a message lost with the connection is put back in the box", async () => {
+  const page = await boot();
+  await sendInChatA(page, "keep me");
+  await reconnect(page);
+  page.socket.serverSend({ type: "active", generations: [] });
+  await tick(20);
+
+  assert.equal(page.$("#input").value, "keep me");
+  assert.match(page.$(".notice").textContent, /not saved.*back in the box/);
+});
+
+test("an older sync answer does not end a reply that was just sent", async () => {
+  const page = await boot();
+  await sendInChatA(page, "just sent");
+  page.socket.serverSend({ type: "active", generations: [] });
+  await tick(20);
+
+  assert.ok(page.$("#send").classList.contains("stop"));
+  assert.equal(page.$("#input").value, "");
+});
+
+test("a finished reply stays on screen if reloading fails, and Retry reloads it", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page);
+  page.socket.serverSend({ type: "chunk", conversation_id: 1, request_id, content: "Hi there", offset: 0 });
+  page.db.failLoad = true;
+  page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
+  await tick(20);
+
+  assert.match(page.threadText(), /Hi there/);
+  assert.match(page.threadText(), /hello/);
+  assert.ok(!page.$("#send").classList.contains("stop"), "the composer is usable again");
+
+  page.db.failLoad = false;
+  page.db.messages[1].push(
+    { message_id: 13, conversation_id: 1, role: "user", content: "hello" },
+    { message_id: 14, conversation_id: 1, role: "assistant", content: "Hi there" },
+  );
+  page.click(page.$(".retry"));
+  await tick(20);
+  assert.equal(page.$(".retry"), null);
+  assert.equal(page.$$(".message.assistant .bubble").filter((b) => b.textContent === "Hi there").length, 1);
+  assert.ok(page.buttons("Edit").every((b) => !b.disabled));
+});
+
+test("a chat that fails to load shows the error and a Retry button", async () => {
+  const page = await boot();
+  page.db.failLoad = true;
+  await page.open("Chat A");
+
+  assert.doesNotMatch(page.threadText(), /Loading chat/);
+  assert.match(page.threadText(), /Service temporarily unavailable/);
+
+  page.db.failLoad = false;
+  page.click(page.$(".retry"));
+  await tick(20);
+  assert.match(page.threadText(), /answer A/);
+});
+
+test("an edit cannot be saved while a reply is running", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  page.click(page.buttons("Edit")[0]);
+  await page.send("something else");
+
+  assert.equal(page.$(".edit-box .button.primary").disabled, true);
+  fireEvent.keyDown(page.$(".edit-box textarea"), { key: "Enter", ctrlKey: true });
+  assert.equal(page.socket.sentOfType("message").length, 1, "the running reply is not replaced");
+});
+
+test("a rejected edit reopens the edit box with the new text", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  page.click(page.buttons("Edit")[0]);
+  fireEvent.change(page.$(".edit-box textarea"), { target: { value: "reworded" } });
+  page.click(page.$(".edit-box .button.primary"));
+  const { request_id } = page.socket.sentOfType("message").at(-1);
+
+  page.socket.serverSend({ type: "error", conversation_id: 1, request_id, error: "Too many messages." });
+  await tick(20);
+
+  assert.equal(page.$(".edit-box textarea").value, "reworded");
+});
+
+test("Stop stays usable when it cannot be sent", async () => {
+  const page = await boot();
+  await sendInChatA(page);
+  page.socket.readyState = 3; // the connection died but no close event yet
+  page.click(page.$("#send"));
+
+  assert.equal(page.$("#send").disabled, false);
+  assert.match(page.$(".notice.error").textContent, /Not connected/);
+});
+
+test("the wait notice goes away when the reply finishes", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page);
+  await page.send("too soon");
+  assert.match(page.threadText(), /Wait for the reply to finish, or press Stop/);
+
+  page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
+  await tick(20);
+  assert.doesNotMatch(page.threadText(), /Wait for the reply to finish, or press Stop/);
+});
+
+test("the not-connected notice goes away after reconnecting", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  page.socket.readyState = 3;
+  await page.send("hello");
+  assert.match(page.threadText(), /Not connected/);
+
+  await reconnect(page);
+  assert.doesNotMatch(page.threadText(), /Not connected/);
 });

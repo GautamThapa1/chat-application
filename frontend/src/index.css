@@ -557,8 +557,8 @@ svg.icon {
   display: flex;
   gap: 14px;
   min-width: 0;
-  animation: rise 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
+.message.live { animation: rise 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 .message.user { justify-content: flex-end; }
 
 @keyframes rise {
@@ -754,6 +754,8 @@ svg.icon {
   text-align: center;
   box-shadow: var(--shadow-sm);
 }
+
+.notice .retry { margin-left: 10px; }
 
 .notice.error {
   border-color: color-mix(in srgb, var(--danger) 30%, transparent);

@@ -40,7 +40,7 @@ function CopyButton({ text }) {
   );
 }
 
-function EditBox({ chat, message }) {
+function EditBox({ chat, message, busy }) {
   const { actions } = useStore();
   return (
     <div className="edit-box">
@@ -58,7 +58,13 @@ function EditBox({ chat, message }) {
         <button type="button" className="button secondary" onClick={() => actions.cancelEdit(chat)}>
           Cancel
         </button>
-        <button type="button" className="button primary" onClick={() => actions.saveEdit(chat, message)}>
+        <button
+          type="button"
+          className="button primary"
+          disabled={busy}
+          title={busy ? "Wait for the reply to finish" : undefined}
+          onClick={() => actions.saveEdit(chat, message)}
+        >
           Save &amp; submit
         </button>
       </div>
@@ -66,7 +72,9 @@ function EditBox({ chat, message }) {
   );
 }
 
-function Message({ chat, message, busy, isLast }) {
+// `live` marks what is not saved yet. Only live entries animate in, so swapping
+// them for the saved messages does not replay the animation.
+function Message({ chat, message, busy, isLast, live = false }) {
   const { actions } = useStore();
   const isUser = message.role === "user";
   const hasId = message.message_id !== null;
@@ -78,13 +86,13 @@ function Message({ chat, message, busy, isLast }) {
 
   return (
     <div
-      className={`message ${isUser ? "user" : "assistant"}`}
+      className={`message ${isUser ? "user" : "assistant"}${live ? " live" : ""}`}
       data-message-id={hasId ? String(message.message_id) : undefined}
     >
       {!isUser && <div className="assistant-avatar">✳</div>}
       <div className="message-body">
         {editing ? (
-          <EditBox chat={chat} message={message} />
+          <EditBox chat={chat} message={message} busy={busy} />
         ) : (
           <>
             <div className="bubble">{message.content}</div>
@@ -122,7 +130,7 @@ function Message({ chat, message, busy, isLast }) {
 
 function StreamingMessage({ gen }) {
   return (
-    <div className="message assistant">
+    <div className="message assistant live">
       <div className="assistant-avatar">✳</div>
       <div className="message-body">
         <div className="bubble">
@@ -172,6 +180,22 @@ function ToolResults({ chat }) {
   );
 }
 
+function LoadError({ chat }) {
+  const { state, actions } = useStore();
+  return (
+    <div className="notice error" role="alert">
+      <span>{chat.loadError}</span>
+      <button
+        type="button"
+        className="link-button retry"
+        onClick={() => actions.reloadConversation(state.activeConversationId)}
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
 function EmptyState() {
   const { state, actions } = useStore();
   return (
@@ -196,7 +220,12 @@ function ThreadContent() {
   const chat = store.activeChat();
 
   if (!chat) return <EmptyState />;
-  if (!chat.loaded) return <div className="notice">Loading chat…</div>;
+  // A chat that never loaded can still hold a live reply (found by a sync).
+  if (!chat.loaded && !chat.messages.length) {
+    return chat.loadError
+      ? <LoadError chat={chat} />
+      : <div className="notice">Loading chat…</div>;
+  }
 
   const gen = chat.generation;
   let visible = chat.messages;
@@ -229,10 +258,13 @@ function ThreadContent() {
           message={{ message_id: null, role: "user", content: gen.prompt }}
           busy
           isLast={false}
+          live
         />
       )}
-      {chat.toolResults.some(isVisibleMemoryResult) && <ToolResults chat={chat} />}
       {gen && <StreamingMessage gen={gen} />}
+      {/* Always after the reply, so it does not move when the reply is saved. */}
+      {chat.toolResults.some(isVisibleMemoryResult) && <ToolResults chat={chat} />}
+      {chat.loadError && <LoadError chat={chat} />}
       {chat.notice && (
         <div className={chat.noticeIsError ? "notice error" : "notice"}>{chat.notice}</div>
       )}

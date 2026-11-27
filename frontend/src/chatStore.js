@@ -17,6 +17,10 @@ const PONG_TIMEOUT_MS = 10000; // how long we wait for the answer
 const CONVERSATION_PAGE_SIZE = 20;
 export const DEFAULT_TITLE = "New chat";
 
+const NOT_CONNECTED = "Not connected — try again in a moment.";
+const WAIT_FOR_REPLY = "Wait for the reply to finish, or press Stop.";
+const STOPPED = "Stopped.";
+
 export const PROMPT_HINTS = [
   ["Remember that my backend uses FastAPI", "Save note"],
   ["Show my notes", "Retrieve notes"],
@@ -186,6 +190,7 @@ export function createChatStore() {
         loaded: false,
         notice: "",
         noticeIsError: false,
+        loadError: "", // the last reload failed; offers Retry
         draft: "",
         editingId: null,
         editDraft: "",
@@ -528,6 +533,12 @@ export function createChatStore() {
     socket.onopen = () => {
       if (socket !== ws) return;
       reconnectAttempt = 0;
+      forgetNotConnected();
+      // Only replies that were already tracked may be ended by the answer to
+      // this sync: one sent after it is not in that answer yet.
+      for (const chat of state.chats.values()) {
+        if (chat.generation) chat.generation.awaitingSync = true;
+      }
       setConnection("Connected", "connected");
       startHeartbeat(socket);
       // Ask which replies are still running on the server. After a reconnect
@@ -582,6 +593,13 @@ export function createChatStore() {
         }, PONG_TIMEOUT_MS);
       }, HEARTBEAT_INTERVAL_MS);
     }
+  }
+
+  function forgetNotConnected() {
+    for (const chat of state.chats.values()) {
+      if (chat.notice === NOT_CONNECTED) setNotice(chat, "");
+    }
+    if (state.blankError === NOT_CONNECTED) state.blankError = "";
   }
 
   // ---------- Server events -> per-conversation state ----------
@@ -642,7 +660,7 @@ export function createChatStore() {
       case "complete":
       case "cancelled":
         if (gen !== null && !isCurrent) break; // an old reply's event: ignore
-        if (msg.type === "cancelled") setNotice(chat, "Stopped.");
+        if (msg.type === "cancelled") setNotice(chat, STOPPED);
         finishGeneration(conversationId);
         break;
 
@@ -676,7 +694,8 @@ export function createChatStore() {
     // A reply we thought was running but the server no longer has: it finished
     // (and was saved) while we were disconnected, so just reload the result.
     for (const [conversationId, chat] of state.chats) {
-      if (chat.generation && !runningIds.has(conversationId) && !chat.generation.finishing) {
+      const gen = chat.generation;
+      if (gen?.awaitingSync && !runningIds.has(conversationId) && !gen.finishing) {
         finishGeneration(conversationId);
       }
     }
@@ -687,10 +706,19 @@ export function createChatStore() {
   // the screen does not flicker; then swap in the database version in one step.
   function finishGeneration(conversationId) {
     const chat = chatState(conversationId);
-    const finished = chat.generation;
-    if (finished) finished.finishing = true;
-    void loadMessages(conversationId, finished);
+    if (chat.generation) chat.generation.finishing = true;
+    if (chat.notice === WAIT_FOR_REPLY) setNotice(chat, "");
+    void loadMessages(conversationId);
     emit();
+  }
+
+  // Put text that never reached the database back where the user can resend it,
+  // without throwing away anything typed since.
+  function returnPrompt(conversationId, prompt) {
+    const chat = chatState(conversationId);
+    const join = (typed) => (typed && typed !== prompt ? `${prompt}\n${typed}` : prompt);
+    if (conversationId === state.activeConversationId) state.input = join(state.input);
+    else chat.draft = join(chat.draft);
   }
 
   function failGeneration(conversationId, error) {
@@ -700,54 +728,96 @@ export function createChatStore() {
     setNotice(chat, error || "Something went wrong.", true);
     // A normal message is only saved when the reply succeeds. Give the text
     // back so the user can resend it with one click.
-    if (gen?.mode === "message" && conversationId === state.activeConversationId && !state.input) {
-      state.input = gen.prompt;
-    } else if (gen?.mode === "message" && !chat.draft) {
-      chat.draft = gen.prompt;
-    }
-    // Edit already changed the database before it failed: show the real state.
-    void loadMessages(conversationId);
+    if (gen?.mode === "message") returnPrompt(conversationId, gen.prompt);
+    // Reload to show what the database really holds.
+    void loadMessages(conversationId).then(() => {
+      if (gen?.mode === "edit") reopenRejectedEdit(chat, gen);
+    });
+    emit();
+  }
+
+  // The server refused an edit: offer the new text again instead of losing it.
+  function reopenRejectedEdit(chat, gen) {
+    const message = chat.messages.find((m) => m.message_id === gen.editMessageId);
+    if (!message || message.content === gen.prompt || chat.generation) return;
+    chat.editingId = message.message_id;
+    chat.editDraft = gen.prompt;
     emit();
   }
 
   // ---------- Loading data ----------
-  // `finishing`: the generation that ends once these messages arrive. It is
-  // cleared in the same update as the new messages, so the reply is never
-  // drawn twice (once live, once saved).
-  async function loadMessages(conversationId, finishing = null) {
+  async function loadMessages(conversationId) {
     const chat = chatState(conversationId);
     const seq = ++chat.loadSeq; // a newer request makes older answers stale
     const generation = userStateGeneration;
-    const clearFinished = () => {
-      // Only clear the reply we were finishing, never a newer one.
-      if (finishing && chat.generation === finishing) chat.generation = null;
-    };
+    let result = null;
     try {
-      const result = await api(`/api/conversations/${conversationId}`);
-      if (generation !== userStateGeneration) return;
-      if (!result.ok) {
-        if (result.status === 401) {
-          showAuth("Your session has ended. Please log in again.");
-          return;
-        } else if (result.status === 404) {
-          dropConversation(conversationId);
-          return;
-        } else if (seq === chat.loadSeq) {
-          setNotice(chat, errorMessage(result.data), true);
-        }
-      } else if (seq === chat.loadSeq) {
-        chat.messages = result.data.messages;
-        chat.loaded = true;
-        updateConversationInList(result.data.conversation);
-      }
+      result = await api(`/api/conversations/${conversationId}`);
     } catch {
-      if (generation !== userStateGeneration) return;
-      if (seq === chat.loadSeq) {
-        setNotice(chat, "Could not reach the server to load this chat.", true);
-      }
+      // Handled below, like an error answer.
     }
-    clearFinished();
+    if (generation !== userStateGeneration) return;
+    if (result?.status === 401) {
+      showAuth("Your session has ended. Please log in again.");
+      return;
+    }
+    if (result?.status === 404) {
+      dropConversation(conversationId);
+      return;
+    }
+    if (seq !== chat.loadSeq) return;
+
+    // A finished reply is cleared in the same update that shows its messages,
+    // so it is never drawn twice (once live, once saved).
+    const finished = chat.generation?.finishing ? chat.generation : null;
+    if (finished) chat.generation = null;
+
+    if (result?.ok) {
+      const before = new Set(chat.messages.map((m) => m.message_id));
+      chat.messages = result.data.messages;
+      chat.loaded = true;
+      chat.loadError = "";
+      updateConversationInList(result.data.conversation);
+      const saved = (m) => m.role === "user" && m.content === finished.prompt
+        && !before.has(m.message_id);
+      if (finished?.mode === "message" && !chat.messages.some(saved)) {
+        returnPrompt(conversationId, finished.prompt);
+        setNotice(chat, chat.notice === STOPPED
+          ? "Stopped. Your message is back in the box."
+          : "Your message was not saved. It is back in the box.");
+      }
+    } else {
+      chat.loadError = result
+        ? errorMessage(result.data)
+        : "Could not reach the server to load this chat.";
+      if (finished) keepUnsaved(conversationId, chat, finished);
+    }
     emit();
+  }
+
+  // The reload after a reply failed: keep what is on screen. These messages
+  // have no database id, so their Edit and Regenerate stay disabled.
+  function keepUnsaved(conversationId, chat, gen) {
+    if (!gen.text) {
+      if (gen.mode === "message") returnPrompt(conversationId, gen.prompt);
+      return;
+    }
+    const reply = { message_id: null, role: "assistant", content: gen.text };
+    if (gen.mode === "regenerate") {
+      const index = chat.messages.findIndex((m) => m.message_id === gen.assistantMessageId);
+      if (index >= 0) chat.messages = [...chat.messages.slice(0, index), reply];
+      return;
+    }
+    const question = gen.mode === "message"
+      ? [{ message_id: null, role: "user", content: gen.prompt }]
+      : [];
+    chat.messages = [...chat.messages, ...question, reply];
+  }
+
+  function reloadConversation(conversationId) {
+    chatState(conversationId).loadError = "";
+    emit();
+    void loadMessages(conversationId);
   }
 
   function updateConversationInList(conversation) {
@@ -1005,7 +1075,7 @@ export function createChatStore() {
     if (!text) return false;
 
     if (!socketIsOpen()) {
-      notifyActive("Not connected — try again in a moment.", true);
+      notifyActive(NOT_CONNECTED, true);
       return false;
     }
     if (state.activeConversationId === null) {
@@ -1015,7 +1085,7 @@ export function createChatStore() {
     }
     const chat = activeChat();
     if (chat.generation) {
-      setNotice(chat, "Wait for the reply to finish, or press Stop.");
+      setNotice(chat, WAIT_FOR_REPLY);
       emit();
       return false;
     }
@@ -1029,7 +1099,7 @@ export function createChatStore() {
       content: text,
     });
     if (!sent) {
-      notifyActive("Not connected — try again in a moment.", true);
+      notifyActive(NOT_CONNECTED, true);
       return false;
     }
 
@@ -1080,6 +1150,11 @@ export function createChatStore() {
   }
 
   function saveEdit(chat, message) {
+    if (chat.generation) { // never replace a reply that is still running
+      setNotice(chat, WAIT_FOR_REPLY);
+      emit();
+      return;
+    }
     const newText = chat.editDraft.trim();
     if (!newText || newText === message.content) {
       cancelEdit(chat);
@@ -1095,7 +1170,7 @@ export function createChatStore() {
       content: newText,
     });
     if (!sent) {
-      setNotice(chat, "Not connected — try again in a moment.", true);
+      setNotice(chat, NOT_CONNECTED, true);
       emit();
       return;
     }
@@ -1104,7 +1179,9 @@ export function createChatStore() {
     chat.messages = chat.messages.slice(0, index + 1);
     chat.messages[index] = { ...message, content: newText };
     chat.editingId = null;
-    startGeneration(chat, { requestId, mode: "edit", prompt: newText });
+    startGeneration(chat, {
+      requestId, mode: "edit", prompt: newText, editMessageId: message.message_id,
+    });
   }
 
   // Regenerate: write a new answer for an existing assistant message.
@@ -1122,7 +1199,7 @@ export function createChatStore() {
       content: "",
     });
     if (!sent) {
-      setNotice(chat, "Not connected — try again in a moment.", true);
+      setNotice(chat, NOT_CONNECTED, true);
       emit();
       return;
     }
@@ -1134,12 +1211,16 @@ export function createChatStore() {
   function stopActiveGeneration() {
     const chat = activeChat();
     if (!chat?.generation || chat.generation.finishing) return;
-    wsSend({
+    const sent = wsSend({
       type: "cancel",
       request_id: chat.generation.requestId,
       conversation_id: state.activeConversationId,
     });
-    chat.generation.stopRequested = true; // until the server confirms with "cancelled"
+    if (sent) {
+      chat.generation.stopRequested = true; // until the server confirms with "cancelled"
+    } else {
+      setNotice(chat, NOT_CONNECTED, true);
+    }
     emit();
   }
 
@@ -1264,6 +1345,7 @@ export function createChatStore() {
       saveEdit,
       regenerate,
       undoMemory,
+      reloadConversation,
     },
     // Exposed for tests and shutdown.
     dispose: closeSocket,
