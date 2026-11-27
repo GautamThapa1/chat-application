@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+import time
 from concurrent import futures
 from contextlib import closing
 
@@ -23,6 +24,8 @@ class _ConversationMessageNotFound(LookupError):
 
 
 _CHAT_STREAM_ERROR_MESSAGE = "Something went wrong. Please try again."
+# Checked before each model and tool call, so a turn can overrun by one call.
+TURN_TIMEOUT_SECONDS = 180
 
 
 def _load_history_for_mode(
@@ -175,6 +178,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                     can_confirm=mode == "message",
                     conversation_id=request.conversation_id,
                     cancelled=cancelled,
+                    deadline=time.monotonic() + TURN_TIMEOUT_SECONDS,
                 ),
             )
             with closing(turn):

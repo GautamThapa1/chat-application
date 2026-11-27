@@ -16,6 +16,23 @@ from backend.service.embedding_worker import EmbeddingWorker
 from backend.service.task_reminder_worker import TaskReminderWorker
 
 
+REQUEST_TIMEOUT_MS = 60_000  # per attempt; a timed-out attempt is retried
+REQUEST_ATTEMPTS = 2
+
+
+def build_http_options() -> types.HttpOptions:
+    """Time limit and retry rules for the chat service's Gemini requests."""
+    retry_options = types.HttpRetryOptions(
+        attempts=REQUEST_ATTEMPTS,
+        initial_delay=1,
+        max_delay=5,
+        http_status_codes=[503],
+    )
+    return types.HttpOptions(
+        timeout=REQUEST_TIMEOUT_MS, retry_options=retry_options
+    )
+
+
 def main() -> None:
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     from shared_common.common.log import setup_logging
@@ -30,15 +47,9 @@ def main() -> None:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("Set GEMINI_API_KEY before starting ChatService.")
-    retry_options = types.HttpRetryOptions(
-        attempts=3,
-        initial_delay=1,
-        max_delay=5,
-        http_status_codes=[503],
-    )
-    http_options = types.HttpOptions(retry_options=retry_options)
-
-    with genai.Client(api_key=api_key, http_options=http_options) as gemini_client:
+    with genai.Client(
+        api_key=api_key, http_options=build_http_options()
+    ) as gemini_client:
         server = create_server(
             port=50051,
             gemini_client=gemini_client,

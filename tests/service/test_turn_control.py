@@ -1,5 +1,6 @@
 """Per-turn rules: Stop and time limits, run through the real agent graph."""
 
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -8,7 +9,8 @@ from google.genai import types
 
 from backend.service import db
 from backend.service.gemini import runner
-from backend.service.turn_control import TurnControl, TurnStopped
+from backend.service.main import build_http_options
+from backend.service.turn_control import TurnControl, TurnStopped, TurnTimedOut
 
 
 def _response(*calls, text=None):
@@ -58,3 +60,18 @@ def test_stop_prevents_the_next_tool(monkeypatch):
     with pytest.raises(TurnStopped):
         list(runner.run_turn("save", client, "m", [], 1, "r", control=control))
     assert saved == ["A"]
+
+
+def test_gemini_requests_have_a_time_limit():
+    options = build_http_options()
+    assert options.timeout == 60_000  # milliseconds
+    assert options.retry_options.attempts == 2
+    assert options.retry_options.http_status_codes == [503]
+
+
+def test_expired_turn_makes_no_model_call():
+    client = _client(_response(text="unused"))
+    control = TurnControl(deadline=time.monotonic() - 1)
+    with pytest.raises(TurnTimedOut):
+        list(runner.run_turn("hi", client, "m", [], 1, "r", control=control))
+    client.models.generate_content_stream.assert_not_called()

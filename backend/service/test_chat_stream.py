@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import grpc
+import httpx
 import pytest
 from google.genai import types
 
@@ -378,3 +379,16 @@ def test_stop_before_saving_keeps_the_old_answer(chat_setup):
     with pytest.raises(GeneratorExit):
         next(events)
     assert db.get_conversation_messages(user_id, conversation_id)[-1]["content"] == "Old answer"
+
+
+@pytest.mark.parametrize("limit, failure", [(-1, None), (180, httpx.ReadTimeout("slow"))])
+def test_timeouts_end_with_an_error_and_save_nothing(chat_setup, monkeypatch, limit, failure):
+    user_id, token, conversation_id, handler_for = chat_setup
+    monkeypatch.setattr("backend.service.chat_service.TURN_TIMEOUT_SECONDS", limit)
+    client = _GeminiClient([], failure=failure)
+
+    events = list(handler_for(client).unary_stream(
+        _request(conversation_id, mode="message"), _Context(token)))
+
+    assert events[-1].WhichOneof("payload") == "error"
+    assert db.get_conversation_messages(user_id, conversation_id) == []
