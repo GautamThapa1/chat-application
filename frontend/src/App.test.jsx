@@ -21,8 +21,19 @@ afterEach(() => {
 
 const tick = (ms = 5) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
 
-/** Boot the page with a fake backend. `db` plays the database. */
-async function boot({ username = "Gautam", db, modules } = {}) {
+/** A promise the test resolves by hand, to keep a fake request in flight. */
+function deferred() {
+  let release;
+  const promise = new Promise((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+/**
+ * Boot the page with a fake backend. `db` plays the database.
+ * `holds` maps an API path (no query string) to a promise: that request is not
+ * answered until the promise resolves.
+ */
+async function boot({ username = "Gautam", db, modules, signedOut = false, holds = {} } = {}) {
   const { App: AppComponent = App, createChatStore: makeStore = createChatStore, StoreContext: Context = StoreContext } = modules || {};
   const sockets = [];
 
@@ -69,9 +80,18 @@ async function boot({ username = "Gautam", db, modules } = {}) {
   const json = (data, status = 200) => Promise.resolve({
     ok: status < 400, status, json: () => Promise.resolve(data),
   });
-  vi.stubGlobal("fetch", (path, options = {}) => {
+  const respond = (path, options) => {
     const method = options.method || "GET";
-    if (path === "/api/me") return json({ user_id: 1, username });
+    if (path === "/api/me") {
+      return signedOut
+        ? json({ detail: "Not logged in." }, 401)
+        : json({ user_id: 1, username });
+    }
+    if (path === "/api/login" && method === "POST") return json({ user_id: 1 });
+    if (path === "/api/logout" && method === "POST") {
+      if (db.logoutError) return json({ detail: db.logoutError }, 503);
+      return json({ ok: true });
+    }
     if (path === "/api/ws-ticket" && method === "POST") {
       db.ticketsIssued = (db.ticketsIssued || 0) + 1;
       return json({ ticket: `t-${db.ticketsIssued}` });
@@ -107,6 +127,10 @@ async function boot({ username = "Gautam", db, modules } = {}) {
       return json({ ok: true });
     }
     return json({ detail: "not found" }, 404);
+  };
+  vi.stubGlobal("fetch", (path, options = {}) => {
+    const hold = holds[path.split("?")[0]];
+    return hold ? hold.then(() => respond(path, options)) : respond(path, options);
   });
 
   const store = makeStore();
@@ -116,7 +140,9 @@ async function boot({ username = "Gautam", db, modules } = {}) {
       <AppComponent />
     </Context.Provider>,
   );
-  await act(() => store.actions.checkSession());
+  // With a held request the session check may not finish, so do not wait on it.
+  if (Object.keys(holds).length) act(() => { void store.actions.checkSession(); });
+  else await act(() => store.actions.checkSession());
   await tick(20);
 
   const $ = (selector) => document.querySelector(selector);
@@ -533,4 +559,97 @@ test("with VITE_WS_URL the socket connects to that host with a fresh single-use 
     vi.unstubAllEnvs();
     vi.resetModules();
   }
+});
+
+async function logIn(page) {
+  fireEvent.change(page.$("#auth-username"), { target: { value: "Gautam" } });
+  fireEvent.change(page.$("#auth-password"), { target: { value: "password123" } });
+  fireEvent.submit(page.$("#auth-form"));
+  await tick(20);
+}
+
+test("a loading screen is shown while the session is being checked", async () => {
+  const me = deferred();
+  const page = await boot({ holds: { "/api/me": me.promise } });
+
+  assert.match(document.body.textContent, /Loading…/);
+
+  me.release();
+  await tick(20);
+  assert.ok(page.$("#chat"));
+  assert.doesNotMatch(document.body.textContent, /Loading…/);
+});
+
+test("logging in shows progress and locks the form until the server answers", async () => {
+  const login = deferred();
+  const page = await boot({ signedOut: true, holds: { "/api/login": login.promise } });
+  await logIn(page);
+
+  assert.match(page.$("#auth-submit").textContent, /Logging in…/);
+  assert.ok(page.$("#auth-submit .spinner"));
+  assert.equal(page.$("#auth-submit").disabled, true);
+  assert.equal(page.$("#auth-switch").disabled, true);
+  assert.equal(page.$("#auth-username").readOnly, true);
+  assert.equal(page.$("#auth-password").readOnly, true);
+
+  login.release();
+  await tick(20);
+  assert.ok(page.$("#chat"));
+  assert.equal(page.$("#user-name").textContent, "Gautam");
+});
+
+test("registering shows its own progress label", async () => {
+  const register = deferred();
+  const page = await boot({ signedOut: true, holds: { "/api/register": register.promise } });
+  page.click(page.$("#auth-switch"));
+  await logIn(page);
+
+  assert.match(page.$("#auth-submit").textContent, /Creating account…/);
+});
+
+test("chats and the socket do not wait for task reminder setup", async () => {
+  const timezone = deferred();
+  const page = await boot({ holds: { "/api/timezone": timezone.promise } });
+
+  assert.ok(page.sidebarItem("Chat A"), "conversations are listed");
+  assert.equal(page.sockets.length, 1, "socket connected");
+  assert.equal(page.$("#connection").textContent, "Connected");
+});
+
+test("the sidebar says chats are loading instead of claiming there are none", async () => {
+  const list = deferred();
+  const page = await boot({ holds: { "/api/conversations": list.promise } });
+
+  assert.match(page.$("#conversations").textContent, /Loading chats…/);
+  assert.doesNotMatch(page.$("#conversations").textContent, /No chats yet/);
+
+  list.release();
+  await tick(20);
+  assert.ok(page.sidebarItem("Chat A"));
+  assert.doesNotMatch(page.$("#conversations").textContent, /Loading chats…/);
+});
+
+test("logging out shows progress, then the login screen", async () => {
+  const logout = deferred();
+  const page = await boot({ holds: { "/api/logout": logout.promise } });
+  page.click(page.$("#logout"));
+  await tick(20);
+
+  assert.match(document.body.textContent, /Signing out…/);
+  assert.equal(page.$("#chat"), null, "no emptied chat screen while waiting");
+  assert.equal(page.$("#auth"), null, "cannot log in again before logout ends");
+
+  logout.release();
+  await tick(20);
+  assert.ok(page.$("#auth-form"));
+  assert.equal(page.$("#auth-error").textContent, "");
+});
+
+test("a failed logout is reported on the login screen", async () => {
+  const page = await boot();
+  page.db.logoutError = "Service temporarily unavailable.";
+  page.click(page.$("#logout"));
+  await tick(20);
+
+  assert.match(page.$("#auth-error").textContent, /Could not end the server session/);
 });

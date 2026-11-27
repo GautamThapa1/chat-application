@@ -7,6 +7,9 @@ export default function AuthScreen() {
   const [password, setPassword] = useState("");
   const usernameRef = useRef(null);
   const registering = state.authMode === "register";
+  const busy = state.authSubmitting;
+  const idleLabel = registering ? "Create account" : "Log in";
+  const busyLabel = registering ? "Creating account…" : "Logging in…";
 
   useEffect(() => {
     usernameRef.current?.focus();
@@ -25,7 +28,7 @@ export default function AuthScreen() {
           <span>Luma Chat</span>
         </div>
         <h2 id="auth-title">{registering ? "Create account" : "Log in"}</h2>
-        <form id="auth-form" noValidate onSubmit={onSubmit}>
+        <form id="auth-form" noValidate aria-busy={busy} onSubmit={onSubmit}>
           <label>
             Username
             <input
@@ -34,6 +37,7 @@ export default function AuthScreen() {
               autoComplete="username"
               maxLength={32}
               required
+              readOnly={busy}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
             />
@@ -46,18 +50,26 @@ export default function AuthScreen() {
               autoComplete={registering ? "new-password" : "current-password"}
               maxLength={128}
               required
+              readOnly={busy}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
           </label>
           <p id="auth-error" className="auth-error" role="alert">{state.authError}</p>
-          <button id="auth-submit" className="button primary" type="submit" disabled={state.authSubmitting}>
-            {registering ? "Create account" : "Log in"}
+          <button id="auth-submit" className="button primary" type="submit" disabled={busy}>
+            {busy && <span className="spinner" aria-hidden="true" />}
+            {busy ? busyLabel : idleLabel}
           </button>
         </form>
         <p className="auth-switch">
           <span id="auth-switch-text">{registering ? "Already have an account?" : "No account yet?"}</span>{" "}
-          <button id="auth-switch" className="link-button" type="button" onClick={actions.toggleAuthMode}>
+          <button
+            id="auth-switch"
+            className="link-button"
+            type="button"
+            disabled={busy}
+            onClick={actions.toggleAuthMode}
+          >
             {registering ? "Log in" : "Create one"}
           </button>
         </p>

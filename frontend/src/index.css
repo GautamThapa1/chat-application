@@ -324,6 +324,12 @@ svg.icon {
   text-align: center;
 }
 
+.conversation-empty .spinner {
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: -2px;
+}
+
 .conversation-search-result {
   display: block;
   width: 100%;
@@ -981,6 +987,36 @@ svg.icon {
 }
 
 .auth-card .button.primary { margin-top: 2px; padding: 11px 16px; border-radius: 12px; font-size: 15px; }
+
+/* While submitting, the button stays solid and shows a spinner. */
+.auth-card form[aria-busy="true"] .button.primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: progress;
+  opacity: 0.85;
+}
+.auth-card .button.primary .spinner {
+  border-color: rgb(255 255 255 / 35%);
+  border-top-color: #fff;
+}
+.auth-card input:read-only { color: var(--muted); }
+
+.loading-card {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 22px;
+}
+.loading-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 14px;
+}
 
 .auth-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 13px; }
 .auth-switch { margin: 18px 0 0; color: var(--muted); font-size: 14px; text-align: center; }

@@ -23,6 +23,13 @@ function ConversationList() {
   }
 
   if (!state.conversations.length) {
+    if (state.conversationsLoading) {
+      return (
+        <p className="conversation-empty" role="status">
+          <span className="spinner" aria-hidden="true" /> Loading chats…
+        </p>
+      );
+    }
     return <p className="conversation-empty">No chats yet</p>;
   }
 

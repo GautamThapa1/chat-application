@@ -4,6 +4,7 @@ import { useStore } from "./StoreContext.js";
 import AuthScreen from "./components/AuthScreen.jsx";
 import Composer from "./components/Composer.jsx";
 import Icon from "./components/Icon.jsx";
+import LoadingScreen from "./components/LoadingScreen.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 import Thread from "./components/Thread.jsx";
 
@@ -37,5 +38,5 @@ export default function App() {
   const { state } = useStore();
   if (state.view === "auth") return <AuthScreen />;
   if (state.view === "chat") return <ChatApp />;
-  return null;
+  return <LoadingScreen />;
 }

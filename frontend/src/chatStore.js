@@ -129,6 +129,7 @@ export function createChatStore() {
   // Everything the UI renders. Mutated in place; `version` signals changes.
   const state = {
     view: "loading", // "loading" | "auth" | "chat"
+    loadingLabel: "Loading…", // shown while view is "loading"
     authMode: "login",
     authError: "",
     authSubmitting: false,
@@ -364,6 +365,14 @@ export function createChatStore() {
     emit();
   }
 
+  // Independent of each other, so none waits for another: reminder setup can be
+  // slow and must not hold back the chats or the live connection.
+  function startSession() {
+    void connectWebSocket();
+    void loadConversations();
+    void syncTaskReminderSettings();
+  }
+
   /** Returns true when the user is now signed in. */
   async function submitAuth(rawName, password) {
     const name = rawName.trim();
@@ -394,12 +403,9 @@ export function createChatStore() {
       clearUserState();
       state.authMode = "login";
       state.authError = "";
-      showChat();
       setCurrentUser(name);
-      emit();
-      await syncTaskReminderSettings();
-      connectWebSocket();
-      await loadConversations();
+      showChat();
+      startSession();
       return true;
     } catch {
       state.authError = "Could not reach the server.";
@@ -411,6 +417,12 @@ export function createChatStore() {
   }
 
   async function logout() {
+    if (state.view !== "chat") return;
+    // Leave the chat first, so an emptied chat screen is never shown. The login
+    // screen waits for the server: a late logout reply would delete the cookie
+    // of a session started in the meantime.
+    state.view = "loading";
+    state.loadingLabel = "Signing out…";
     clearUserState();
     setConnection("Disconnected", "error");
     let message = "";
@@ -432,9 +444,7 @@ export function createChatStore() {
         clearUserState();
         setCurrentUser(me.data.username);
         showChat();
-        await syncTaskReminderSettings();
-        connectWebSocket();
-        await loadConversations();
+        startSession();
       } else if (me.status === 401) {
         showAuth();
       } else {
@@ -767,6 +777,8 @@ export function createChatStore() {
 
   async function loadConversations() {
     const generation = userStateGeneration;
+    state.conversationsLoading = true;
+    emit();
     try {
       const result = await api(`/api/conversations?limit=${CONVERSATION_PAGE_SIZE}&offset=0`);
       if (generation !== userStateGeneration) return;
@@ -778,9 +790,13 @@ export function createChatStore() {
       appendConversations(result.data.conversations);
       state.conversationOffset = result.data.pagination.offset + result.data.conversations.length;
       state.conversationTotalCount = result.data.pagination.total_count;
-      emit();
     } catch {
       if (generation === userStateGeneration) setConnection("Could not load chats", "error");
+    } finally {
+      if (generation === userStateGeneration) {
+        state.conversationsLoading = false;
+        emit();
+      }
     }
   }
 
