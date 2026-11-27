@@ -788,19 +788,22 @@ def dispatch_tool_call(
             ),
         })
 
-    task_id = args["task_id"]
-    result = db.complete_task_idempotent(
-        user_id, task_id, _with_idempotency_key(idempotency_key)
-    )
-    return ToolExecutionResult({
-        "task_id": task_id,
-        "success": result["success"],
-        "status": (
-            "✅ Task completed"
-            if result["success"]
-            else "⚠️ Task not found or not completed"
-        ),
-    })
+    if name == "complete_task":
+        task_id = args["task_id"]
+        result = db.complete_task_idempotent(
+            user_id, task_id, _with_idempotency_key(idempotency_key)
+        )
+        return ToolExecutionResult({
+            "task_id": task_id,
+            "success": result["success"],
+            "status": (
+                "✅ Task completed"
+                if result["success"]
+                else "⚠️ Task not found or not completed"
+            ),
+        })
+
+    raise ValueError(f"No handler for Gemini tool: {name!r}.")
 
 
 def _response_content_and_calls(

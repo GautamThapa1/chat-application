@@ -447,3 +447,17 @@ def test_notes_confirmation_cannot_confirm_clearing_tasks():
 
     assert result.response["confirmation_required"] is True
     assert "confirm clear tasks fresh-token" in result.response["message"]
+
+
+def test_listed_tool_without_a_handler_completes_nothing(monkeypatch):
+    complete = Mock()
+    monkeypatch.setattr(db, "complete_task_idempotent", complete)
+    monkeypatch.setitem(
+        gemini_chat._TOOL_FIELDS, "snooze_task", ({"task_id"}, {"task_id"})
+    )
+    with pytest.raises(ValueError, match="No handler for Gemini tool"):
+        gemini_chat.dispatch_tool_call(
+            "snooze_task", {"task_id": 1}, user_id=1,
+            user_message="Snooze", history=[], confirmation_token="unused",
+        )
+    complete.assert_not_called()
