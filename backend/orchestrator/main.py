@@ -21,7 +21,11 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 
 from backend.generated import chat_pb2_grpc
 from backend.orchestrator import auth, conversations, memories, notes, reminders
 from backend.orchestrator.grpc_session import SessionStub
-from backend.orchestrator.rate_limit import default_limit_retry_after, limiter
+from backend.orchestrator.rate_limit import (
+    connector_limit_retry_after,
+    default_limit_retry_after,
+    limiter,
+)
 from backend.orchestrator.websocket import websocket_endpoint
 from shared_common.common.log import setup_logging
 
@@ -52,6 +56,11 @@ app.add_exception_handler(
 @app.middleware("http")  # HTTP only: WebSockets are not touched
 async def default_rate_limit(request: Request, call_next):
     retry_after = default_limit_retry_after(get_remote_address(request))
+    connector = request.headers.get("cf-connecting-ip")
+    if retry_after is None and connector:
+        retry_after = connector_limit_retry_after(
+            connector, request.method, request.url.path
+        )
     if retry_after is not None:
         return JSONResponse(
             {"detail": "Too many requests. Please slow down."},

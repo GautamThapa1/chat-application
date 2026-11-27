@@ -141,3 +141,50 @@ def test_successful_login_resets_the_account_limit(proxied):
 
     stub.Login.side_effect = wrong_password
     assert [guess(http, n).status_code for n in range(30, 40)] == [401] * 10
+
+
+# ---- caps on the address Cloudflare reports, which cannot be forged ------ #
+def forged_requests(app_client, count, method, path, connector="203.0.113.50", **kwargs):
+    """Send requests that claim a new X-Forwarded-For address every time."""
+    http = TestClient(ProxyHeadersMiddleware(app_client.app, trusted_hosts="*"))
+    codes = []
+    for n in range(count):
+        headers = {"X-Forwarded-For": f"10.{n // 250}.{n % 250}.1"}
+        if connector:
+            headers["CF-Connecting-IP"] = connector
+        body = kwargs["json"](n) if "json" in kwargs else None
+        codes.append(http.request(method, path, json=body, headers=headers).status_code)
+    return codes
+
+
+def test_forged_addresses_stop_at_the_connector_cap(app_client):
+    codes = forged_requests(app_client, 602, "GET", "/api/me")
+
+    assert codes[:600] == [401] * 600
+    assert codes[600:] == [429, 429]
+    assert forged_requests(app_client, 1, "GET", "/api/me", connector="203.0.113.51") == [401]
+
+
+def test_forged_addresses_cannot_spray_logins_across_accounts(app_client):
+    codes = forged_requests(
+        app_client, 101, "POST", "/api/login",
+        json=lambda n: {"username": f"user{n}", "password": "guess"},
+    )
+
+    assert codes == [200] * 100 + [429]
+
+
+def test_forged_addresses_cannot_mass_register(app_client):
+    app_client.app.state.grpc_stub.Register = AsyncMock(return_value=MagicMock(user_id=1))
+    codes = forged_requests(
+        app_client, 31, "POST", "/api/register",
+        json=lambda n: {"username": f"user{n}", "password": "password123"},
+    )
+
+    assert codes == [201] * 30 + [429]
+
+
+def test_no_connector_cap_without_the_cloudflare_header(app_client):
+    codes = forged_requests(app_client, 602, "GET", "/api/me", connector=None)
+
+    assert codes == [401] * 602

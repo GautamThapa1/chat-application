@@ -35,6 +35,30 @@ def message_limit_retry_after(user_id: int) -> int | None:
     stats = moving_strategy.get_window_stats(MESSAGE_LIMIT, "ws-message", key)
     return max(1, math.ceil(stats.reset_time - time.time()))
 
+# The limits above go by the client address, which can be forged where
+# X-Forwarded-For is trusted. Cloudflare (in front of Render) sets
+# CF-Connecting-IP itself and rejects clients that send it, so these looser caps
+# cannot be escaped. They are looser because every visitor coming through the
+# Vercel proxy may share one such address.
+CONNECTOR_DEFAULT_LIMIT = parse("600/minute")
+CONNECTOR_PATH_LIMITS = {
+    "/api/login": parse("100/15 minutes"),
+    "/api/register": parse("30/15 minutes"),
+}
+
+
+def connector_limit_retry_after(address: str, method: str, path: str) -> int | None:
+    """None if this connecting address is within its caps, else seconds to wait."""
+    checks = [("connector", CONNECTOR_DEFAULT_LIMIT)]
+    if method == "POST" and path in CONNECTOR_PATH_LIMITS:
+        checks.append((f"connector{path}", CONNECTOR_PATH_LIMITS[path]))
+    for namespace, limit in checks:
+        if not moving_strategy.hit(limit, namespace, address):
+            stats = moving_strategy.get_window_stats(limit, namespace, address)
+            return max(1, math.ceil(stats.reset_time - time.time()))
+    return None
+
+
 # Per account, so it holds even if the client address is forged. The cost: someone
 # who keeps guessing can also lock the real owner out until the window passes.
 LOGIN_LIMIT = parse("10/15 minutes")
