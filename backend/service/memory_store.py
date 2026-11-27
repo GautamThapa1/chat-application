@@ -7,7 +7,7 @@ from backend.embeddings import (
     note_content_hash,
     validate_embedding_vector,
 )
-from backend.service import db, note_vector_index
+from backend.service import db, note_vector_index, search_text
 
 
 def _queue_memory_embedding(
@@ -266,15 +266,14 @@ def search_memories(user_id: int, keyword: str) -> list[dict]:
         raise ValueError("Keyword cannot be blank.")
     conn = db.get_connection()
     try:
-        like = f"%{keyword}%"
         rows = conn.execute(
             """SELECT id, title, content, created_at
                  FROM memories
-                WHERE user_id = ? AND (title LIKE ? OR content LIKE ?)
+                WHERE user_id = ?
                 ORDER BY id""",
-            (user_id, like, like),
+            (user_id,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return search_text.rank_by_keywords(rows, keyword)
     finally:
         conn.close()
 
@@ -580,17 +579,14 @@ def search_memories_hybrid(
                 entity="memories",
             )
         )
-        keyword_rows = (
+        keyword_scores = search_text.keyword_scores(
             conn.execute(
-                """SELECT id FROM memories
-                     WHERE user_id = ? AND (title LIKE ? OR content LIKE ?)""",
-                (user_id, f"%{keyword}%", f"%{keyword}%"),
-            ).fetchall()
-            if keyword
-            else []
+                "SELECT id, title, content FROM memories WHERE user_id = ?",
+                (user_id,),
+            ).fetchall(),
+            keyword,
         )
-        keyword_ids = {row["id"] for row in keyword_rows}
-        candidate_ids = set(vector_matches) | keyword_ids
+        candidate_ids = set(vector_matches) | set(keyword_scores)
         if not candidate_ids:
             return []
         placeholders = ",".join("?" for _ in candidate_ids)
@@ -619,11 +615,11 @@ def search_memories_hybrid(
                 != note_content_hash(row["title"], row["content"])
             ):
                 similarity = None
-            is_keyword_match = row["id"] in keyword_ids
-            if similarity is None and not is_keyword_match:
+            word_score = keyword_scores.get(row["id"], 0)
+            if not search_text.is_relevant(similarity, word_score):
                 continue
             semantic_score = (similarity + 1) / 2 if similarity is not None else 0
-            score = 0.7 * semantic_score + 0.3 * is_keyword_match
+            score = 0.7 * semantic_score + 0.3 * word_score
             ranked.append((score, row))
         ranked.sort(key=lambda result: (-result[0], result[1]["id"]))
         return [

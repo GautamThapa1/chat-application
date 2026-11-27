@@ -33,7 +33,7 @@ from backend.conversation_chunks import (
     chunk_conversation,
     conversation_snapshot_hash,
 )
-from backend.service import note_vector_index
+from backend.service import note_vector_index, search_text
 
 
 # DB_PATH lets Docker keep the database on a mounted volume (e.g. /data/app.db).
@@ -1390,18 +1390,19 @@ def update_note_idempotent(
 
 
 def search_notes(user_id: int, keyword: str) -> list[dict]:
-    """Return notes whose title or content contains `keyword` (case-insensitive)."""
+    """Notes matching words of `keyword`, best first; all notes if it is blank."""
     conn = get_connection()
     try:
-        like = f"%{keyword}%"
         rows = conn.execute(
             """SELECT id, title, content, created_at
                  FROM notes
-                WHERE user_id = ? AND (title LIKE ? OR content LIKE ?)
+                WHERE user_id = ?
                 ORDER BY id""",
-            (user_id, like, like),
+            (user_id,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        if not keyword.strip():
+            return [dict(row) for row in rows]
+        return search_text.rank_by_keywords(rows, keyword)
     finally:
         conn.close()
 
@@ -1968,7 +1969,7 @@ def search_notes_hybrid(
     model: str,
     limit: int = 20,
 ) -> list[dict]:
-    """Combine Qdrant similarity with the existing case-insensitive search."""
+    """Combine Qdrant similarity with word matching."""
     query_vector = _float_vector(query_embedding)
     if not model:
         raise ValueError("Embedding model is required.")
@@ -1987,19 +1988,14 @@ def search_notes_hybrid(
                 limit=limit,
             )
         )
-        keyword_rows = (
+        keyword_scores = search_text.keyword_scores(
             conn.execute(
-                """SELECT id FROM notes
-                     WHERE user_id = ? AND (title LIKE ? OR content LIKE ?)""",
-                (user_id, f"%{keyword}%", f"%{keyword}%"),
-            ).fetchall()
-            if keyword
-            else []
+                "SELECT id, title, content FROM notes WHERE user_id = ?",
+                (user_id,),
+            ).fetchall(),
+            keyword,
         )
-        keyword_ids = {
-            row["id"] for row in keyword_rows
-        } if keyword else set()
-        candidate_ids = set(vector_matches) | keyword_ids
+        candidate_ids = set(vector_matches) | set(keyword_scores)
         if not candidate_ids:
             return []
         placeholders = ",".join("?" for _ in candidate_ids)
@@ -2028,11 +2024,11 @@ def search_notes_hybrid(
                 != note_content_hash(row["title"], row["content"])
             ):
                 similarity = None
-            is_keyword_match = row["id"] in keyword_ids
-            if similarity is None and not is_keyword_match:
+            word_score = keyword_scores.get(row["id"], 0)
+            if not search_text.is_relevant(similarity, word_score):
                 continue
             semantic_score = (similarity + 1) / 2 if similarity is not None else 0
-            score = 0.7 * semantic_score + 0.3 * is_keyword_match
+            score = 0.7 * semantic_score + 0.3 * word_score
             ranked.append((score, row))
 
         ranked.sort(key=lambda result: (-result[0], result[1]["id"]))
