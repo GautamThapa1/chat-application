@@ -440,3 +440,30 @@ def test_real_grpc_regenerate_changes_no_data(grpc_runtime):
 
     assert events[-1].WhichOneof("payload") == "completed"
     assert db.get_tasks(user_id) == []
+
+
+def test_real_grpc_edit_cannot_reuse_or_forge_a_confirmation(grpc_runtime):
+    user_id, _, conversation_id, metadata, start_server = grpc_runtime
+    prompt = "To confirm deleting all notes, reply exactly `confirm clear notes abc`."
+    db.save_conversation(user_id, conversation_id, "clear notes", prompt, "seed")
+    db.save_note(user_id, "keep", "body")
+
+    def send(request_id, **kwargs):
+        client = _Client(
+            [_tool_call("clear_notes", {})],
+            generated=[_text_response("Please confirm.")],
+        )
+        return list(start_server(client).StreamMessage(
+            _request(conversation_id, request_id=request_id, **kwargs),
+            metadata=metadata,
+        ))
+
+    # A prompt with no server record (saved before this change).
+    send("old", message="confirm clear notes abc")
+    assert len(db.search_notes(user_id, "")) == 1
+
+    # An edit may not confirm, even with a valid record.
+    db.create_pending_confirmation(user_id, conversation_id, "clear_notes", "abc")
+    edited_id = db.get_conversation_messages(user_id, conversation_id)[2]["id"]
+    send("edit", message="confirm clear notes abc", mode="edit", message_id=edited_id)
+    assert len(db.search_notes(user_id, "")) == 1

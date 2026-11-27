@@ -1306,3 +1306,28 @@ def test_failed_note_update_keeps_note_and_vector(owners_db, monkeypatch):
 
     assert deleted == []
     assert db.search_notes(user_a, "")[0]["title"] == "Old"
+
+
+def test_confirmation_is_scoped_single_use_and_expires(owners_db):
+    user_a, user_b = owners_db
+    cid = db.create_conversation(user_a)["id"]
+    db.save_note(user_a, "keep", "body")
+    db.create_pending_confirmation(user_a, cid, "clear_notes", "tok")
+
+    with pytest.raises(db.ConfirmationInvalid):
+        db.clear_notes_idempotent(user_b, "k0", confirmation=(cid, "tok"))
+    with pytest.raises(db.ConfirmationInvalid):
+        db.clear_tasks_idempotent(user_a, "k1", confirmation=(cid, "tok"))
+    assert db.clear_notes_idempotent(
+        user_a, "k2", confirmation=(cid, "tok")
+    ) == {"deleted_count": 1}
+
+    db.save_note(user_a, "new", "body")
+    with pytest.raises(db.ConfirmationInvalid):
+        db.clear_notes_idempotent(user_a, "k3", confirmation=(cid, "tok"))
+    db.create_pending_confirmation(
+        user_a, cid, "clear_notes", "late", ttl_seconds=-1
+    )
+    with pytest.raises(db.ConfirmationInvalid):
+        db.clear_notes_idempotent(user_a, "k4", confirmation=(cid, "late"))
+    assert len(db.search_notes(user_a, "")) == 1

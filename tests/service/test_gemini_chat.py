@@ -6,6 +6,7 @@ from google.genai import types
 
 from backend.service import db
 from backend.service import gemini_chat
+from backend.service.turn_control import TurnControl
 
 
 def _response(*calls, text=None):
@@ -199,11 +200,13 @@ def test_clear_tools_require_the_matching_confirmation(
 ):
     calls = []
 
-    def clear(user_id, idempotency_key):
-        calls.append((user_id, idempotency_key))
+    def clear(user_id, idempotency_key, *, confirmation):
+        calls.append((user_id, idempotency_key, confirmation))
         return result
 
     monkeypatch.setattr(db, store_function, clear)
+    monkeypatch.setattr(db, "create_pending_confirmation", Mock())
+    control = TurnControl(conversation_id=5, can_confirm=True)
     pending = gemini_chat.dispatch_tool_call(
         name,
         {},
@@ -211,6 +214,7 @@ def test_clear_tools_require_the_matching_confirmation(
         user_message="clear everything",
         history=[],
         confirmation_token="one-time-token",
+        control=control,
     )
 
     assert pending.response["confirmation_required"] is True
@@ -225,10 +229,11 @@ def test_clear_tools_require_the_matching_confirmation(
         history=[{"role": "assistant", "content": prompt}],
         confirmation_token="unused",
         idempotency_key="turn-key",
+        control=control,
     )
 
     assert confirmed.response["status"] == expected_status
-    assert calls == [(9, "turn-key")]
+    assert calls == [(9, "turn-key", (5, "one-time-token"))]
 
 
 def test_search_notes_uses_sync_embedding_and_hybrid_storage(monkeypatch):

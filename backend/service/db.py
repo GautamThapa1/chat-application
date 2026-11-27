@@ -372,6 +372,20 @@ def init_db():
                         REFERENCES conversations(conversation_id, user_id) ON DELETE CASCADE
                 )
             """)
+            # A delete-all request waiting for the user's typed confirmation.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_confirmations (
+                    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    conversation_id INTEGER NOT NULL,
+                    action          TEXT NOT NULL CHECK (action IN ('clear_notes', 'clear_tasks')),
+                    token_hash      TEXT NOT NULL,
+                    expires_at      INTEGER NOT NULL,
+                    PRIMARY KEY (user_id, conversation_id, action),
+                    FOREIGN KEY (conversation_id, user_id)
+                        REFERENCES conversations(conversation_id, user_id)
+                        ON DELETE CASCADE
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS conversation_embedding_index (
                     chunk_id          TEXT PRIMARY KEY,
@@ -1915,6 +1929,61 @@ def delete_note(user_id: int, note_id: int) -> bool:
         conn.close()
 
 
+# --------------------------------------------------------------------------- #
+# Delete-all confirmations
+# --------------------------------------------------------------------------- #
+CONFIRMATION_TTL_SECONDS = 10 * 60
+
+
+class ConfirmationInvalid(ValueError):
+    """The confirmation is unknown, already used, expired, or someone else's."""
+
+
+def create_pending_confirmation(
+    user_id: int,
+    conversation_id: int,
+    action: str,
+    token: str,
+    ttl_seconds: int = CONFIRMATION_TTL_SECONDS,
+) -> None:
+    """Remember the one token that may confirm `action` in this conversation."""
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute(
+                """INSERT INTO pending_confirmations
+                       (user_id, conversation_id, action, token_hash, expires_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, conversation_id, action) DO UPDATE SET
+                       token_hash = excluded.token_hash,
+                       expires_at = excluded.expires_at""",
+                (
+                    user_id,
+                    conversation_id,
+                    action,
+                    _hash_token(token),
+                    int(time.time()) + ttl_seconds,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def _consume_confirmation(
+    conn, user_id: int, action: str, confirmation: tuple[int, str]
+) -> None:
+    """Use up a confirmation inside the transaction that does the delete."""
+    conversation_id, token = confirmation
+    used = conn.execute(
+        """DELETE FROM pending_confirmations
+            WHERE user_id = ? AND conversation_id = ? AND action = ?
+              AND token_hash = ? AND expires_at > ?""",
+        (user_id, conversation_id, action, _hash_token(token), int(time.time())),
+    )
+    if used.rowcount != 1:
+        raise ConfirmationInvalid("This confirmation is no longer valid.")
+
+
 def clear_notes_in_transaction(conn, user_id: int) -> dict:
     if conn is None:
         return {"deleted_count": clear_notes(user_id)}
@@ -1935,15 +2004,21 @@ def clear_notes_in_transaction(conn, user_id: int) -> dict:
 def clear_notes_idempotent(
     user_id: int,
     idempotency_key: str,
+    *,
+    confirmation: tuple[int, str] | None = None,
 ) -> dict:
     # Clearing has no payload beyond the owner scope. The stored count prevents
     # a timeout retry from reporting a second deletion as 0 instead of 1.
+    if confirmation is not None and not idempotency_key:
+        raise ValueError("A confirmed clear needs an idempotency key.")
+
+    def execute(conn) -> dict:
+        if confirmation is not None:
+            _consume_confirmation(conn, user_id, "clear_notes", confirmation)
+        return clear_notes_in_transaction(conn, user_id)
+
     return run_idempotent_request(
-        user_id,
-        idempotency_key,
-        "clear_notes",
-        {},
-        lambda conn: clear_notes_in_transaction(conn, user_id),
+        user_id, idempotency_key, "clear_notes", {}, execute,
     )
 
 
@@ -2410,9 +2485,19 @@ def clear_tasks(user_id: int) -> int:
         conn.close()
 
 
-def clear_tasks_idempotent(user_id: int, idempotency_key: str) -> dict:
+def clear_tasks_idempotent(
+    user_id: int,
+    idempotency_key: str,
+    *,
+    confirmation: tuple[int, str] | None = None,
+) -> dict:
     # The stored count stops a timeout retry from reporting 0 on the second call.
+    if confirmation is not None and not idempotency_key:
+        raise ValueError("A confirmed clear needs an idempotency key.")
+
     def execute(conn) -> dict:
+        if confirmation is not None:
+            _consume_confirmation(conn, user_id, "clear_tasks", confirmation)
         if conn is None:
             return {"deleted_count": clear_tasks(user_id)}
         conn.execute(

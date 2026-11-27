@@ -540,6 +540,46 @@ def _with_idempotency_key(key: str | None) -> str:
     return key or secrets.token_urlsafe(24)
 
 
+def _confirmed_clear(
+    clear,
+    user_id: int,
+    user_message: str,
+    idempotency_key: str | None,
+    control: TurnControl | None,
+) -> dict | None:
+    """Run a confirmed delete-all once; None if the stored record refuses it."""
+    if control is None or not control.can_confirm or control.conversation_id is None:
+        return None
+    token = user_message.strip().rsplit(" ", 1)[-1]
+    try:
+        return clear(
+            user_id,
+            _with_idempotency_key(idempotency_key),
+            confirmation=(control.conversation_id, token),
+        )
+    except db.ConfirmationInvalid:
+        return None
+
+
+def _confirmation_request(
+    action: str,
+    prompt_template: str,
+    user_id: int,
+    token: str,
+    control: TurnControl | None,
+) -> ToolExecutionResult:
+    """Ask the user to type the phrase, and record that this token is pending."""
+    if control is not None and control.conversation_id is not None:
+        db.create_pending_confirmation(
+            user_id, control.conversation_id, action, token
+        )
+    prompt = prompt_template.format(token=token)
+    return ToolExecutionResult(
+        {"confirmation_required": True, "message": prompt},
+        confirmation_prompt=prompt,
+    )
+
+
 def dispatch_tool_call(
     name: str | None,
     arguments: Any,
@@ -694,15 +734,17 @@ def dispatch_tool_call(
         })
 
     if name == "clear_notes":
-        if not _clear_confirmation_is_valid(user_message, history):
-            prompt = CLEAR_CONFIRMATION_PROMPT.format(token=confirmation_token)
-            return ToolExecutionResult(
-                {"confirmation_required": True, "message": prompt},
-                confirmation_prompt=prompt,
+        result = None
+        if _clear_confirmation_is_valid(user_message, history):
+            result = _confirmed_clear(
+                db.clear_notes_idempotent,
+                user_id, user_message, idempotency_key, control,
             )
-        result = db.clear_notes_idempotent(
-            user_id, _with_idempotency_key(idempotency_key)
-        )
+        if result is None:
+            return _confirmation_request(
+                "clear_notes", CLEAR_CONFIRMATION_PROMPT,
+                user_id, confirmation_token, control,
+            )
         return ToolExecutionResult({
             "deleted_count": result["deleted_count"],
             "status": (
@@ -785,17 +827,17 @@ def dispatch_tool_call(
         })
 
     if name == "clear_tasks":
-        if not _clear_tasks_confirmation_is_valid(user_message, history):
-            prompt = CLEAR_TASKS_CONFIRMATION_PROMPT.format(
-                token=confirmation_token
+        result = None
+        if _clear_tasks_confirmation_is_valid(user_message, history):
+            result = _confirmed_clear(
+                db.clear_tasks_idempotent,
+                user_id, user_message, idempotency_key, control,
             )
-            return ToolExecutionResult(
-                {"confirmation_required": True, "message": prompt},
-                confirmation_prompt=prompt,
+        if result is None:
+            return _confirmation_request(
+                "clear_tasks", CLEAR_TASKS_CONFIRMATION_PROMPT,
+                user_id, confirmation_token, control,
             )
-        result = db.clear_tasks_idempotent(
-            user_id, _with_idempotency_key(idempotency_key)
-        )
         return ToolExecutionResult({
             "deleted_count": result["deleted_count"],
             "status": (
