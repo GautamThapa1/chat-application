@@ -20,6 +20,8 @@ export const DEFAULT_TITLE = "New chat";
 const NOT_CONNECTED = "Not connected — try again in a moment.";
 const WAIT_FOR_REPLY = "Wait for the reply to finish, or press Stop.";
 const STOPPED = "Stopped.";
+// Waits between session checks while the server wakes up (about a minute in all).
+const SESSION_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
 
 export const PROMPT_HINTS = [
   ["Remember that my backend uses FastAPI", "Save note"],
@@ -63,14 +65,23 @@ export function groupLabel(value) {
   return "Older";
 }
 
+// One validation error from the server, in plain words.
+function fieldError(item) {
+  const field = String(item.loc?.[item.loc.length - 1] ?? "input");
+  const name = field.charAt(0).toUpperCase() + field.slice(1);
+  if (field === "username" && item.type === "string_pattern_mismatch") {
+    return "Username can only use letters, numbers and underscores.";
+  }
+  if (item.msg?.startsWith("String should ")) {
+    return `${item.msg.replace("String should", `${name} should`)}.`;
+  }
+  return `${field}: ${item.msg}`;
+}
+
 export function errorMessage(data) {
   const detail = data && data.detail;
   if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) {
-    return detail
-      .map((item) => `${item.loc?.[item.loc.length - 1] ?? "input"}: ${item.msg}`)
-      .join(" · ");
-  }
+  if (Array.isArray(detail)) return detail.map(fieldError).join(" · ");
   return "Something went wrong. Please try again.";
 }
 
@@ -110,6 +121,10 @@ async function api(path, method = "GET", body) {
   } catch {
     // Non-JSON response bodies have no structured error details.
   }
+  // The sign-in limiter answers {"error": ...}, not the usual {"detail": ...}.
+  if (response.status === 429 && !data?.detail) {
+    data = { detail: "Too many attempts. Please wait a few minutes and try again." };
+  }
   return { ok: response.ok, status: response.status, data };
 }
 
@@ -134,6 +149,7 @@ export function createChatStore() {
   const state = {
     view: "loading", // "loading" | "auth" | "chat"
     loadingLabel: "Loading…", // shown while view is "loading"
+    loadingFailed: false, // the server never answered: offer Retry
     authMode: "login",
     authError: "",
     authSubmitting: false,
@@ -166,6 +182,8 @@ export function createChatStore() {
   let ws = null; // the one socket (null while disconnected)
   let reconnectAttempt = 0; // consecutive failed reconnects; 0 when connected
   let reconnectTimer = null;
+  let sessionTimer = null;
+  let sessionCheck = 0; // only the newest session check may change the screen
   let pingTimer = null;
   let pongTimer = null;
   let signedIn = false;
@@ -241,11 +259,14 @@ export function createChatStore() {
   }
 
   async function syncTaskReminderSettings() {
+    const generation = userStateGeneration;
+    const stale = () => generation !== userStateGeneration;
     setReminders({ visible: false, status: "" });
     try {
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (timezone) {
         const result = await api("/api/timezone", "POST", { timezone });
+        if (stale()) return;
         if (!result.ok) {
           setReminders({ status: `Timezone was not saved: ${errorMessage(result.data)}` });
         }
@@ -257,6 +278,7 @@ export function createChatStore() {
       }
 
       const config = await api("/api/push/config");
+      if (stale()) return;
       if (!config.ok) throw new Error(errorMessage(config.data));
       if (!config.data?.enabled || !config.data.publicKey) {
         setReminders({ status: "Task reminders are not configured on this server." });
@@ -264,9 +286,12 @@ export function createChatStore() {
       }
 
       pushRegistration = await navigator.serviceWorker.register("/service-worker.js");
-      pushSubscription = await pushRegistration.pushManager.getSubscription();
+      const subscription = await pushRegistration.pushManager.getSubscription();
+      if (stale()) return;
+      pushSubscription = subscription;
       if (pushSubscription) {
         await savePushSubscription(pushSubscription);
+        if (stale()) return;
         setReminders({
           visible: true, enabled: true, status: "Task reminders are enabled on this device.",
         });
@@ -274,6 +299,7 @@ export function createChatStore() {
         setReminders({ visible: true, enabled: false });
       }
     } catch (error) {
+      if (stale()) return;
       setReminders({ status: `Task reminders unavailable: ${error.message}` });
     }
   }
@@ -361,6 +387,10 @@ export function createChatStore() {
     state.activeConversationId = null;
     state.blankError = "";
     signedIn = false;
+    ticketGeneration = null;
+    pushSubscription = null;
+    state.reminders = { visible: false, enabled: false, busy: false, status: "" };
+    state.sidebarOpen = false;
     setCurrentUser("");
     state.input = "";
     emit();
@@ -368,6 +398,7 @@ export function createChatStore() {
 
   function showAuth(message = "") {
     clearUserState();
+    state.loadingFailed = false;
     state.view = "auth";
     state.authError = message;
     state.authFocusSeq += 1;
@@ -412,7 +443,11 @@ export function createChatStore() {
 
       const login = await api("/api/login", "POST", { username: name, password });
       if (!login.ok) {
-        state.authError = errorMessage(login.data);
+        const created = state.authMode === "register";
+        if (created) state.authMode = "login"; // registering again would fail
+        state.authError = created
+          ? `Your account was created. Log in to continue. (${errorMessage(login.data)})`
+          : errorMessage(login.data);
         return false;
       }
 
@@ -437,11 +472,21 @@ export function createChatStore() {
     // Leave the chat first, so an emptied chat screen is never shown. The login
     // screen waits for the server: a late logout reply would delete the cookie
     // of a session started in the meantime.
+    const endpoint = pushSubscription?.endpoint;
     state.view = "loading";
     state.loadingLabel = "Signing out…";
     clearUserState();
     setConnection("Disconnected", "error");
     let message = "";
+    if (endpoint) {
+      // Stop reminders for this account on this device while still signed in.
+      // The browser keeps its subscription, so the next login restores them.
+      try {
+        await api("/api/push/subscription", "DELETE", { endpoint });
+      } catch {
+        // Logging out matters more; the logout call reports an unreachable server.
+      }
+    }
     try {
       const result = await api("/api/logout", "POST");
       if (!result.ok) {
@@ -453,22 +498,43 @@ export function createChatStore() {
     showAuth(message);
   }
 
+  // A sleeping server (free hosting) takes a while to answer. That is not the
+  // same as being logged out, so keep asking before giving up.
   async function checkSession() {
-    try {
-      const me = await api("/api/me");
-      if (me.ok) {
+    const check = ++sessionCheck;
+    state.view = "loading";
+    state.loadingLabel = "Loading…";
+    state.loadingFailed = false;
+    emit();
+    for (let attempt = 0; ; attempt += 1) {
+      let me = null;
+      try {
+        me = await api("/api/me");
+      } catch {
+        // Unreachable: retry below.
+      }
+      if (check !== sessionCheck) return;
+      if (me?.ok) {
         clearUserState();
         setCurrentUser(me.data.username);
         showChat();
         startSession();
-      } else if (me.status === 401) {
-        showAuth();
-      } else {
-        showAuth(errorMessage(me.data));
+        return;
       }
-    } catch {
-      showAuth("Could not reach the server.");
+      if (me && me.status < 500) {
+        showAuth(me.status === 401 ? "" : errorMessage(me.data));
+        return;
+      }
+      if (attempt >= SESSION_RETRY_DELAYS_MS.length) break;
+      state.loadingLabel = "Waking up the server…";
+      emit();
+      await new Promise((resolve) => {
+        sessionTimer = setTimeout(resolve, SESSION_RETRY_DELAYS_MS[attempt]);
+      });
     }
+    state.loadingLabel = "Could not reach the server.";
+    state.loadingFailed = true;
+    emit();
   }
 
   // ---------- WebSocket (one per session) ----------
@@ -503,7 +569,7 @@ export function createChatStore() {
     return true;
   }
 
-  let ticketPending = false;
+  let ticketGeneration = null; // the session that is waiting for a ticket
 
   function scheduleReconnect() {
     const delay = reconnectDelayMs(reconnectAttempt++);
@@ -512,11 +578,11 @@ export function createChatStore() {
   }
 
   async function connectWebSocket() {
-    if (!signedIn || ws || ticketPending) return;
+    if (!signedIn || ws || ticketGeneration === userStateGeneration) return;
     const generation = userStateGeneration;
     let url = wsUrl();
     if (WS_URL) {
-      ticketPending = true;
+      ticketGeneration = generation;
       setConnection("Connecting…", "");
       let result = null;
       try {
@@ -524,7 +590,7 @@ export function createChatStore() {
       } catch {
         // Server unreachable (e.g. waking up): retry below.
       } finally {
-        ticketPending = false;
+        if (ticketGeneration === generation) ticketGeneration = null;
       }
       if (generation !== userStateGeneration || !signedIn || ws) return;
       if (result?.status === 401) {
@@ -1290,10 +1356,16 @@ export function createChatStore() {
     const item = chat.toolResults[index];
     if (!item || item.undone || item.undoing) return;
 
+    const generation = userStateGeneration;
     item.undoing = true;
     emit();
     try {
       const response = await api(`/api/memories/${item.result.memory_id}`, "DELETE");
+      if (generation !== userStateGeneration) return;
+      if (response.status === 401) {
+        showAuth("Your session has ended. Please log in again.");
+        return;
+      }
       if (!response.ok) {
         throw new Error(errorMessage(response.data));
       }
@@ -1411,6 +1483,10 @@ export function createChatStore() {
       reloadConversation,
     },
     // Exposed for tests and shutdown.
-    dispose: closeSocket,
+    dispose() {
+      sessionCheck += 1;
+      clearTimeout(sessionTimer);
+      closeSocket();
+    },
   };
 }

@@ -17,6 +17,9 @@ afterEach(() => {
   cleanup();
   for (const store of stores) store.dispose();
   stores.length = 0;
+  delete navigator.serviceWorker;
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 const tick = (ms = 5) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -76,18 +79,31 @@ async function boot({ username = "Gautam", db, modules, signedOut = false, holds
     },
   };
   db.deletedMemoryIds ??= [];
+  db.calls = [];
 
   const json = (data, status = 200) => Promise.resolve({
     ok: status < 400, status, json: () => Promise.resolve(data),
   });
   const respond = (path, options) => {
     const method = options.method || "GET";
+    db.calls.push(`${method} ${path}`);
     if (path === "/api/me") {
+      if (db.meFailures > 0) {
+        db.meFailures -= 1;
+        return json(null, 502);
+      }
       return signedOut
         ? json({ detail: "Not logged in." }, 401)
         : json({ user_id: 1, username });
     }
-    if (path === "/api/login" && method === "POST") return json({ user_id: 1 });
+    if (path === "/api/register" && method === "POST") {
+      return db.registerReply ? json(...db.registerReply) : json({ user_id: 1 }, 201);
+    }
+    if (path === "/api/login" && method === "POST") {
+      return db.loginReply ? json(...db.loginReply) : json({ user_id: 1 });
+    }
+    if (path === "/api/push/config") return json({ enabled: true, publicKey: "AAAA" });
+    if (path === "/api/push/subscription") return json({ ok: true });
     if (path === "/api/logout" && method === "POST") {
       if (db.logoutError) return json({ detail: db.logoutError }, 503);
       return json({ ok: true });
@@ -132,6 +148,7 @@ async function boot({ username = "Gautam", db, modules, signedOut = false, holds
     }
     const memoryMatch = path.match(/^\/api\/memories\/(\d+)$/);
     if (memoryMatch && method === "DELETE") {
+      if (db.sessionExpired) return json({ detail: "Not logged in." }, 401);
       if (db.deleteMemoryError) return json({ detail: db.deleteMemoryError }, 503);
       db.deletedMemoryIds.push(Number(memoryMatch[1]));
       return json({ ok: true });
@@ -160,7 +177,7 @@ async function boot({ username = "Gautam", db, modules, signedOut = false, holds
   const $$ = (selector) => [...document.querySelectorAll(selector)];
   const click = (element) => act(() => { element.click(); });
   const page = {
-    window, db, sockets, $, $$, click,
+    window, db, sockets, store, $, $$, click,
     get socket() { return sockets[sockets.length - 1]; },
     threadText: () => $("#thread").textContent,
     sidebarItem: (title) => $$(".conversation-item").find((i) => i.textContent.includes(title)),
@@ -1003,4 +1020,169 @@ test("deleting the open chat keeps the phone drawer open", async () => {
 
   assert.ok(page.$("#chat").classList.contains("sidebar-open"));
   assert.match(page.threadText(), /question B/);
+});
+
+async function logOut(page) {
+  page.click(page.$("#logout"));
+  await tick(20);
+}
+
+test("logging out closes the phone drawer and forgets reminder status", async () => {
+  const page = await boot();
+  page.click(page.$("#menu"));
+  assert.ok(page.store.state.reminders.status);
+  await logOut(page);
+  assert.equal(page.store.state.reminders.status, "");
+  await logIn(page);
+
+  assert.ok(!page.$("#chat").classList.contains("sidebar-open"));
+});
+
+test("a late reminder answer is ignored after logout", async () => {
+  const timezone = deferred();
+  const page = await boot({ holds: { "/api/timezone": timezone.promise } });
+  await logOut(page);
+  timezone.release();
+  await tick(20);
+
+  assert.equal(page.store.state.reminders.status, "");
+});
+
+test("logging out stops reminders for this device on the server", async () => {
+  let unsubscribed = false;
+  const subscription = {
+    endpoint: "https://fcm.googleapis.com/x",
+    toJSON() { return { endpoint: this.endpoint, keys: { p256dh: "p", auth: "a" } }; },
+    unsubscribe: async () => { unsubscribed = true; },
+  };
+  vi.stubGlobal("PushManager", class {});
+  Object.defineProperty(navigator, "serviceWorker", {
+    configurable: true,
+    value: {
+      register: async () => ({ pushManager: { getSubscription: async () => subscription } }),
+    },
+  });
+  const page = await boot();
+  await logOut(page);
+
+  const removed = page.db.calls.indexOf("DELETE /api/push/subscription");
+  assert.ok(removed >= 0 && removed < page.db.calls.indexOf("POST /api/logout"));
+  assert.equal(unsubscribed, false, "the next login can restore reminders");
+});
+
+test("too many login attempts are explained", async () => {
+  const page = await boot({ signedOut: true });
+  page.db.loginReply = [{ error: "Rate limit exceeded: 10 per 15 minute" }, 429];
+  await logIn(page);
+
+  assert.match(page.$("#auth-error").textContent, /Too many attempts/);
+});
+
+test("a rejected username is explained in plain words", async () => {
+  const page = await boot({ signedOut: true });
+  page.db.registerReply = [{ detail: [{
+    type: "string_pattern_mismatch", loc: ["body", "username"],
+    msg: "String should match pattern '^[A-Za-z0-9_]+$'",
+  }] }, 422];
+  page.click(page.$("#auth-switch"));
+  await logIn(page);
+
+  assert.equal(
+    page.$("#auth-error").textContent,
+    "Username can only use letters, numbers and underscores.",
+  );
+});
+
+test("if the login after registering fails, the login form is shown", async () => {
+  const page = await boot({ signedOut: true });
+  page.db.loginReply = [{ detail: "Service temporarily unavailable." }, 503];
+  page.click(page.$("#auth-switch"));
+  await logIn(page);
+
+  assert.equal(page.$("#auth-title").textContent, "Log in");
+  assert.match(page.$("#auth-error").textContent, /account was created/i);
+});
+
+test("a sleeping server is retried instead of showing the login screen", async () => {
+  const page = await boot({ db: { meFailures: 1, conversations: [], messages: {} }, holds: { "GET /none": Promise.resolve() } });
+  assert.match(document.body.textContent, /Waking up the server…/);
+  assert.ok(!page.$("#auth-form"));
+
+  await tick(1300);
+  assert.ok(page.$("#chat"));
+});
+
+test("if the server never wakes up, Retry is offered", async () => {
+  vi.useFakeTimers();
+  let up = false;
+  vi.stubGlobal("fetch", () => (up
+    ? Promise.resolve({ ok: false, status: 401, json: async () => ({}) })
+    : Promise.reject(new TypeError("offline"))));
+  const store = createChatStore();
+  stores.push(store);
+  render(<StoreContext.Provider value={store}><App /></StoreContext.Provider>);
+  act(() => { void store.actions.checkSession(); });
+  await act(() => vi.advanceTimersByTimeAsync(120000));
+
+  assert.match(document.body.textContent, /Could not reach the server/);
+  up = true;
+  await act(async () => {
+    document.querySelector(".retry").click();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+  assert.ok(document.querySelector("#auth-form"));
+});
+
+test("logging in again while a socket ticket is pending still connects", async () => {
+  vi.stubEnv("VITE_WS_URL", "wss://api.example.onrender.com/ws");
+  vi.resetModules();
+  const modules = {
+    App: (await import("./App.jsx")).default,
+    createChatStore: (await import("./chatStore.js")).createChatStore,
+    StoreContext: (await import("./StoreContext.js")).StoreContext,
+  };
+  try {
+    const ticket = deferred();
+    const page = await boot({ modules, holds: { "/api/ws-ticket": ticket.promise } });
+    await logOut(page);
+    await logIn(page);
+    ticket.release();
+    await tick(20);
+    assert.equal(page.sockets.length, 1);
+  } finally {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  }
+});
+
+test("undoing a memory after the session ended shows the login screen", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page);
+  page.socket.serverSend(memoryEvent(request_id));
+  page.db.sessionExpired = true;
+  page.click(page.$(".tool-result button"));
+  await tick(20);
+
+  assert.match(page.$("#auth-error").textContent, /session has ended/);
+});
+
+test("a failed copy says so", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  page.click(page.buttons("Copy")[0]);
+  await tick();
+
+  assert.equal(page.buttons("Copy failed").length, 1);
+});
+
+test("on a touch screen Enter adds a new line instead of sending", async () => {
+  vi.stubGlobal("matchMedia", (query) => ({ matches: query === "(pointer: coarse)" }));
+  const page = await boot();
+  type(page, "line one");
+  const notCancelled = fireEvent.keyDown(page.$("#input"), { key: "Enter" });
+  await tick(20);
+
+  assert.equal(notCancelled, true);
+  assert.equal(page.socket.sentOfType("message").length, 0);
+  assert.ok(!page.$(".composer-note"));
 });

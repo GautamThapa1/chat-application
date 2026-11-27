@@ -8,6 +8,8 @@ export default function Composer() {
   const inputRef = useRef(null);
   const gen = store.activeChat()?.generation;
   const generating = Boolean(gen);
+  // A touch keyboard has no Shift+Enter, so there Enter makes a new line.
+  const touch = Boolean(globalThis.matchMedia?.("(pointer: coarse)").matches);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -41,7 +43,7 @@ export default function Composer() {
           value={state.input}
           onChange={(e) => actions.setInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (e.key === "Enter" && !touch && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               e.currentTarget.form.requestSubmit();
             }
@@ -60,7 +62,7 @@ export default function Composer() {
           <Icon name={generating ? "stop" : "send"} />
         </button>
       </div>
-      <p className="composer-note">Enter to send · Shift+Enter for a new line</p>
+      {!touch && <p className="composer-note">Enter to send · Shift+Enter for a new line</p>}
     </form>
   );
 }

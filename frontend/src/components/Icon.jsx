@@ -20,6 +20,7 @@ const PATHS = {
       <path d="M16 16h5v5" />
     </>
   ),
+  failed: <path d="M18 6 6 18M6 6l12 12" />,
   trash: (
     <>
       <path d="M3 6h18" />

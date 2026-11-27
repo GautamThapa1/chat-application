@@ -12,32 +12,30 @@ function ActionButton({ label, icon, onClick, disabled, title }) {
   );
 }
 
+const COPY_STATES = {
+  idle: { label: "Copy", icon: "copy", title: "Copy" },
+  copied: { label: "Copied", icon: "check", title: "Copied" },
+  failed: { label: "Copy failed", icon: "failed", title: "Copy is not available in this browser context" },
+};
+
 function CopyButton({ text }) {
-  const [copied, setCopied] = useState(false);
-  const [title, setTitle] = useState("Copy");
+  const [result, setResult] = useState("idle"); // "idle" | "copied" | "failed"
   useEffect(() => {
-    if (!copied) return undefined;
-    const timer = setTimeout(() => setCopied(false), 1500);
+    if (result === "idle") return undefined;
+    const timer = setTimeout(() => setResult("idle"), 1500);
     return () => clearTimeout(timer);
-  }, [copied]);
+  }, [result]);
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
+      setResult("copied");
     } catch {
-      setTitle("Copy is not available in this browser context");
+      setResult("failed");
     }
   }
-  return (
-    <ActionButton
-      label={copied ? "Copied" : "Copy"}
-      icon={copied ? "check" : "copy"}
-      onClick={copy}
-      disabled={false}
-      title={title}
-    />
-  );
+  const { label, icon, title } = COPY_STATES[result];
+  return <ActionButton label={label} icon={icon} title={title} onClick={copy} />;
 }
 
 function EditBox({ chat, message, busy }) {
