@@ -1011,32 +1011,24 @@ def run_idempotent_request(
                 if not can_execute:
                     pass
                 else:
-                    try:
-                        response = execute(conn)
-                        if not isinstance(response, dict):
-                            raise TypeError(
-                                "Idempotent mutation responses must be dictionaries."
-                            )
-                        conn.execute(
-                            """UPDATE api_idempotency
-                                  SET status = 'completed',
-                                      response_json = ?,
-                                      lease_until = 0,
-                                      updated_at = ?
-                                WHERE user_id = ? AND idempotency_key = ?""",
-                            (json.dumps(response, sort_keys=True),
-                             int(time.time()), user_id, key),
+                    # Any failure leaves the "with" block, which rolls back the
+                    # mutation together with the key claim.
+                    response = execute(conn)
+                    if not isinstance(response, dict):
+                        raise TypeError(
+                            "Idempotent mutation responses must be dictionaries."
                         )
-                        return response
-                    except Exception:
-                        conn.execute(
-                            """UPDATE api_idempotency
-                                  SET lease_until = 0, updated_at = ?
-                                WHERE user_id = ? AND idempotency_key = ?""",
-                            (int(time.time()), user_id, key),
-                        )
-                        conn.commit()
-                        raise
+                    conn.execute(
+                        """UPDATE api_idempotency
+                              SET status = 'completed',
+                                  response_json = ?,
+                                  lease_until = 0,
+                                  updated_at = ?
+                            WHERE user_id = ? AND idempotency_key = ?""",
+                        (json.dumps(response, sort_keys=True),
+                         int(time.time()), user_id, key),
+                    )
+                    return response
         finally:
             conn.close()
 
@@ -1176,8 +1168,6 @@ def update_note_idempotent(
         ).fetchone()
         if note is None:
             return {"found": False}
-        if indexed is not None:
-            note_vector_index.delete_points(indexed["collection"], [note_id])
         updated = conn.execute(
             "UPDATE notes SET title = ?, content = ? WHERE id = ? AND user_id = ?",
             (title, content, note_id, user_id),
@@ -1188,6 +1178,9 @@ def update_note_idempotent(
             "DELETE FROM note_embedding_index WHERE note_id = ?", (note_id,)
         )
         _queue_note_embedding(conn, note_id, user_id, title, content)
+        # Qdrant cannot be rolled back, so touch it only after the SQL succeeded.
+        if indexed is not None:
+            note_vector_index.delete_points(indexed["collection"], [note_id])
         return {
             "found": True,
             "id": note_id,
@@ -1933,9 +1926,9 @@ def clear_notes_in_transaction(conn, user_id: int) -> dict:
     by_collection: dict[str, list[int]] = {}
     for row in indexed_rows:
         by_collection.setdefault(row["collection"], []).append(row["note_id"])
+    cur = conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
     for collection, note_ids in by_collection.items():
         note_vector_index.delete_points(collection, note_ids)
-    cur = conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
     return {"deleted_count": cur.rowcount}
 
 

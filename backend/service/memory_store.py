@@ -297,8 +297,6 @@ def _update_memory_in_transaction(
     ).fetchone()
     if memory is None:
         return {"found": False}
-    if indexed is not None:
-        note_vector_index.delete_points(indexed["collection"], [memory_id])
     updated = conn.execute(
         "UPDATE memories SET title = ?, content = ? WHERE id = ? AND user_id = ?",
         (title, content, memory_id, user_id),
@@ -310,6 +308,9 @@ def _update_memory_in_transaction(
         (memory_id,),
     )
     _queue_memory_embedding(conn, memory_id, user_id, title, content)
+    # Qdrant cannot be rolled back, so touch it only after the SQL succeeded.
+    if indexed is not None:
+        note_vector_index.delete_points(indexed["collection"], [memory_id])
     return {
         "found": True,
         "id": memory_id,

@@ -1268,3 +1268,41 @@ def test_relative_date_without_time_defaults_to_nine_am(owners_db):
         expected.isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )
+
+def test_failed_idempotent_write_leaves_nothing(owners_db, monkeypatch):
+    user_a, _ = owners_db
+    real = db._schedule_task_reminder
+
+    def fail(*args):
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(db, "_schedule_task_reminder", fail)
+    with pytest.raises(RuntimeError):
+        db.create_task_idempotent(user_a, "Once", "", "task-key")
+    assert db.get_tasks(user_a) == []
+
+    monkeypatch.setattr(db, "_schedule_task_reminder", real)
+    db.create_task_idempotent(user_a, "Once", "", "task-key")
+    assert [task["title"] for task in db.get_tasks(user_a)] == ["Once"]
+
+
+def test_failed_note_update_keeps_note_and_vector(owners_db, monkeypatch):
+    user_a, _ = owners_db
+    note_id = db.save_note(user_a, "Old", "first")
+    assert db.upsert_note_embedding(
+        user_a, note_id, [1.0, 0.0], "test-model", note_content_hash("Old", "first")
+    )
+    deleted = []
+    monkeypatch.setattr(
+        db.note_vector_index, "delete_points", lambda *args: deleted.append(args)
+    )
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(db, "_queue_note_embedding", fail)
+    with pytest.raises(RuntimeError):
+        db.update_note_idempotent(user_a, note_id, "New", "second", "update-key")
+
+    assert deleted == []
+    assert db.search_notes(user_a, "")[0]["title"] == "Old"
