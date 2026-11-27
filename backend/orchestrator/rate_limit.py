@@ -35,6 +35,25 @@ def message_limit_retry_after(user_id: int) -> int | None:
     stats = moving_strategy.get_window_stats(MESSAGE_LIMIT, "ws-message", key)
     return max(1, math.ceil(stats.reset_time - time.time()))
 
+# Per account, so it holds even if the client address is forged. The cost: someone
+# who keeps guessing can also lock the real owner out until the window passes.
+LOGIN_LIMIT = parse("10/15 minutes")
+
+
+def login_limit_retry_after(username: str) -> int | None:
+    """Count one login attempt; None if allowed, else seconds to wait."""
+    key = username.lower()  # usernames ignore case
+    if moving_strategy.hit(LOGIN_LIMIT, "login-user", key):
+        return None
+    stats = moving_strategy.get_window_stats(LOGIN_LIMIT, "login-user", key)
+    return max(1, math.ceil(stats.reset_time - time.time()))
+
+
+def clear_login_limit(username: str) -> None:
+    """A correct password starts the count again."""
+    moving_strategy.clear(LOGIN_LIMIT, "login-user", username.lower())
+
+
 def reset_limits() -> None:
     """Clear all counters. Used by tests."""
     limiter.reset()

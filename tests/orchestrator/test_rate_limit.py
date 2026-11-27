@@ -1,10 +1,12 @@
 from unittest.mock import AsyncMock, MagicMock
 
+import grpc
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from backend.orchestrator import auth
 from backend.orchestrator.rate_limit import limiter, reset_limits
@@ -94,3 +96,48 @@ def test_blocked_response_tells_client_when_to_retry(app_client):
     blocked = app_client.get("/api/me")
     assert blocked.status_code == 429
     assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+# ---- per-username limit: holds even when the client address is forged ---- #
+@pytest.fixture
+def proxied(client):
+    """The app as start.sh runs it: forwarded addresses from anyone are believed."""
+    wrong_password = grpc.aio.AioRpcError(
+        grpc.StatusCode.UNAUTHENTICATED, grpc.aio.Metadata(), grpc.aio.Metadata(),
+        details="Invalid username or password.",
+    )
+    client.app.state.grpc_stub.Login = AsyncMock(side_effect=wrong_password)
+    return TestClient(ProxyHeadersMiddleware(client.app, trusted_hosts="*")), client.app.state.grpc_stub
+
+
+def guess(http, number, username="victim"):
+    return http.post(
+        "/api/login",
+        json={"username": username, "password": "wrong"},
+        headers={"X-Forwarded-For": f"10.0.{number}.1"},
+    )
+
+
+def test_forged_addresses_cannot_guess_one_account_forever(proxied):
+    http, stub = proxied
+    codes = [guess(http, n).status_code for n in range(10)]
+    blocked = guess(http, 11, username="VICTIM")  # usernames ignore case
+
+    assert codes == [401] * 10
+    assert blocked.status_code == 429
+    assert "account" in blocked.json()["detail"]
+    assert int(blocked.headers["Retry-After"]) >= 1
+    assert stub.Login.await_count == 10
+    assert guess(http, 12, username="someone_else").status_code == 401
+
+
+def test_successful_login_resets_the_account_limit(proxied):
+    http, stub = proxied
+    for n in range(9):
+        guess(http, n)
+    wrong_password = stub.Login.side_effect
+    stub.Login.side_effect = None
+    stub.Login.return_value = MagicMock(session_token="t", user_id=1)
+    assert guess(http, 20).status_code == 200
+
+    stub.Login.side_effect = wrong_password
+    assert [guess(http, n).status_code for n in range(30, 40)] == [401] * 10

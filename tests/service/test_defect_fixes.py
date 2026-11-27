@@ -338,3 +338,9 @@ def test_failed_note_write_never_removes_its_vector(user, monkeypatch, action):
             db.update_note(user, note, "New", "second")
 
     assert removed == []
+
+
+@pytest.mark.parametrize("name", ["Asia/Katmandu", "Asia/Calcutta"])
+def test_older_timezone_names_reported_by_browsers_are_accepted(user, name):
+    assert db.set_user_timezone(user, name) is True
+    assert db.get_user_timezone(user) == name

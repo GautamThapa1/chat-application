@@ -14,7 +14,11 @@ from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 from pydantic import BaseModel, Field
 
 from backend.generated import chat_pb2
-from backend.orchestrator.rate_limit import limiter
+from backend.orchestrator.rate_limit import (
+    clear_login_limit,
+    limiter,
+    login_limit_retry_after,
+)
 
 log = logging.getLogger("orchestrator")
 
@@ -83,6 +87,13 @@ async def register(body: RegisterBody, request: Request):
 @router.post("/login")
 @limiter.limit("10 per 15 minutes")  # little more because legit user may attemp to sign in more
 async def login(body: LoginBody, request: Request, response: Response):
+    retry_after = login_limit_retry_after(body.username)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts for this account. Please wait a few minutes and try again.",
+            headers={"Retry-After": str(retry_after)},
+        )
     try:
         result = await request.app.state.grpc_stub.Login(
             chat_pb2.LoginRequest(username=body.username, password=body.password)
@@ -90,6 +101,7 @@ async def login(body: LoginBody, request: Request, response: Response):
     except grpc.aio.AioRpcError as exc:
         raise _http_error(exc) from exc
 
+    clear_login_limit(body.username)
     response.set_cookie(
         key=SESSION_COOKIE,
         value=result.session_token,
