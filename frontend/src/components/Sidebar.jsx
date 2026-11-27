@@ -7,6 +7,8 @@ function ConversationList() {
 
   if (state.searchActive) {
     if (!state.searchResults.length) {
+      // While searching or after an error the status line above says so.
+      if (state.searchPending || state.searchFailed) return null;
       return <p className="conversation-empty">No matching chats</p>;
     }
     return state.searchResults.map((result) => (
@@ -30,6 +32,7 @@ function ConversationList() {
         </p>
       );
     }
+    if (state.listError) return null;
     return <p className="conversation-empty">No chats yet</p>;
   }
 
@@ -111,6 +114,15 @@ export default function Sidebar() {
         <button type="submit">Search</button>
       </form>
       <p id="conversation-search-status" role="status" aria-live="polite">{state.searchStatus}</p>
+      {state.listError && (
+        <div className="sidebar-error" role="alert">
+          <span>{state.listError}</span>
+          <button type="button" className="link-button retry" onClick={() => void actions.loadConversations()}>
+            Retry
+          </button>
+        </div>
+      )}
+      {state.sidebarError && <div className="sidebar-error" role="alert">{state.sidebarError}</div>}
       <nav id="conversations" aria-label="Conversations">
         <ConversationList />
       </nav>

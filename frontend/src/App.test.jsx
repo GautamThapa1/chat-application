@@ -30,8 +30,8 @@ function deferred() {
 
 /**
  * Boot the page with a fake backend. `db` plays the database.
- * `holds` maps an API path (no query string) to a promise: that request is not
- * answered until the promise resolves.
+ * `holds` maps an API path (no query string), optionally prefixed by a method
+ * ("POST /api/x"), to a promise: that request is not answered until it resolves.
  */
 async function boot({ username = "Gautam", db, modules, signedOut = false, holds = {} } = {}) {
   const { App: AppComponent = App, createChatStore: makeStore = createChatStore, StoreContext: Context = StoreContext } = modules || {};
@@ -97,17 +97,25 @@ async function boot({ username = "Gautam", db, modules, signedOut = false, holds
       return json({ ticket: `t-${db.ticketsIssued}` });
     }
     if (path === "/api/conversations/search" && method === "POST") {
+      if (db.failSearch) return json({ detail: "Search is down." }, 503);
       return json({ results: db.searchResults || [] });
     }
     if (path.startsWith("/api/conversations?")) {
+      if (db.failList) return json({ detail: "Service temporarily unavailable." }, 503);
       return json({
-        conversations: db.conversations,
+        conversations: structuredClone(db.conversations.slice(0, db.pageSize)),
         pagination: { limit: 20, offset: 0, total_count: db.conversations.length },
       });
     }
     const match = path.match(/^\/api\/conversations\/(\d+)$/);
+    if (match && method === "DELETE") {
+      if (db.failDelete) return json({ detail: "Could not delete." }, 503);
+      db.conversations = db.conversations.filter((c) => c.conversation_id !== Number(match[1]));
+      return json({ ok: true });
+    }
     if (match && method === "GET") {
       const id = Number(match[1]);
+      if (db.missing?.includes(id)) return json({ detail: "Conversation not found." }, 404);
       if (db.failLoad) return json({ detail: "Service temporarily unavailable." }, 503);
       return json({
         conversation: db.conversations.find((c) => c.conversation_id === id),
@@ -131,7 +139,8 @@ async function boot({ username = "Gautam", db, modules, signedOut = false, holds
     return json({ detail: "not found" }, 404);
   };
   vi.stubGlobal("fetch", (path, options = {}) => {
-    const hold = holds[path.split("?")[0]];
+    const route = path.split("?")[0];
+    const hold = holds[`${options.method || "GET"} ${route}`] ?? holds[route];
     return hold ? hold.then(() => respond(path, options)) : respond(path, options);
   });
 
@@ -286,7 +295,7 @@ test("stale and duplicate events are ignored", async () => {
 
   const streaming = page.$$(".message.assistant .bubble").pop().textContent;
   assert.equal(streaming, "Hi");
-  assert.equal(page.$(".tool-results"), null);
+  assert.ok(!page.$(".tool-results"));
 });
 
 test("internal search results stay hidden while the assistant reply remains visible", async () => {
@@ -308,7 +317,7 @@ test("internal search results stay hidden while the assistant reply remains visi
       }],
     },
   });
-  assert.equal(page.$(".tool-results"), null);
+  assert.ok(!page.$(".tool-results"));
   assert.doesNotMatch(page.threadText(), /Memory: Answer style|prefers concise answers/);
 
   page.socket.serverSend({
@@ -327,7 +336,7 @@ test("internal search results stay hidden while the assistant reply remains visi
   page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
   await tick(20);
 
-  assert.equal(page.$(".tool-results"), null);
+  assert.ok(!page.$(".tool-results"));
   assert.equal(page.$$(".message.assistant .bubble").at(-1).textContent, "I'll keep my replies concise.");
 });
 
@@ -358,7 +367,7 @@ test("saved memories show an undo action and remove the memory", async () => {
 
   assert.deepEqual(page.db.deletedMemoryIds, [42]);
   assert.match(page.threadText(), /Memory removed/);
-  assert.equal(page.$(".tool-result button"), null);
+  assert.ok(!page.$(".tool-result button"));
 });
 
 test("memory undo errors are shown and can be retried", async () => {
@@ -412,7 +421,7 @@ test("internal tool results stay hidden if the assistant response is cancelled o
   });
   page.socket.serverSend({ type: "cancelled", conversation_id: 1, request_id });
   await tick(20);
-  assert.equal(page.$(".tool-results"), null);
+  assert.ok(!page.$(".tool-results"));
   assert.doesNotMatch(page.threadText(), /Task added/);
   assert.match(page.$(".notice").textContent, /Stopped/);
 
@@ -433,7 +442,7 @@ test("internal tool results stay hidden if the assistant response is cancelled o
     error: "Tool follow-up failed",
   });
   await tick(20);
-  assert.equal(page.$(".tool-results"), null);
+  assert.ok(!page.$(".tool-results"));
   assert.doesNotMatch(page.threadText(), /task_id.*8|Task added/s);
   assert.match(page.$(".notice.error").textContent, /Tool follow-up failed/);
 });
@@ -510,7 +519,7 @@ test("after a reconnect the page re-syncs a reply that kept running", async () =
     }],
   });
   assert.match(page.threadText(), /Partial so far/);
-  assert.equal(page.$(".tool-results"), null);
+  assert.ok(!page.$(".tool-results"));
   assert.doesNotMatch(page.threadText(), /Task added/);
   assert.ok(page.sidebarItem("Chat A").querySelector(".spinner"));
 });
@@ -534,7 +543,7 @@ test("semantic search shows conversation chunk previews and opens the selected c
 
   assert.equal(page.$$(".conversation-search-result").length, 1);
   assert.match(page.$("#conversations").textContent, /answer B/);
-  assert.match(page.$("#conversation-search-status").textContent, /1 matching chats/);
+  assert.equal(page.$("#conversation-search-status").textContent, "1 matching chat");
 
   page.click(page.$(".conversation-search-result"));
   await tick(20);
@@ -638,8 +647,8 @@ test("logging out shows progress, then the login screen", async () => {
   await tick(20);
 
   assert.match(document.body.textContent, /Signing out…/);
-  assert.equal(page.$("#chat"), null, "no emptied chat screen while waiting");
-  assert.equal(page.$("#auth"), null, "cannot log in again before logout ends");
+  assert.ok(!page.$("#chat"), "no emptied chat screen while waiting");
+  assert.ok(!page.$("#auth"), "cannot log in again before logout ends");
 
   logout.release();
   await tick(20);
@@ -763,7 +772,7 @@ test("a finished reply stays on screen if reloading fails, and Retry reloads it"
   );
   page.click(page.$(".retry"));
   await tick(20);
-  assert.equal(page.$(".retry"), null);
+  assert.ok(!page.$(".retry"));
   assert.equal(page.$$(".message.assistant .bubble").filter((b) => b.textContent === "Hi there").length, 1);
   assert.ok(page.buttons("Edit").every((b) => !b.disabled));
 });
@@ -837,4 +846,161 @@ test("the not-connected notice goes away after reconnecting", async () => {
 
   await reconnect(page);
   assert.doesNotMatch(page.threadText(), /Not connected/);
+});
+
+/** Start sending from a blank chat while the server is still creating it. */
+async function sendWhileCreating(text = "first message") {
+  const create = deferred();
+  const page = await boot({ holds: { "POST /api/conversations": create.promise } });
+  await page.send(text);
+  return { page, create };
+}
+
+const type = (page, value) => fireEvent.change(page.$("#input"), { target: { value } });
+
+test("moving to another chat while a new one is created does not pull you back", async () => {
+  const { page, create } = await sendWhileCreating();
+  await page.open("Chat B");
+  type(page, "draft for B");
+  create.release();
+  await tick(20);
+
+  assert.equal(page.socket.sentOfType("message")[0].conversation_id, 3);
+  assert.match(page.threadText(), /question B/);
+  assert.equal(page.$("#input").value, "draft for B");
+
+  page.click(page.$("#new-chat"));
+  assert.equal(page.$("#input").value, "", "the sent text is not left as a draft");
+});
+
+test("text typed while a new chat is created is kept", async () => {
+  const { page, create } = await sendWhileCreating();
+  type(page, "next thought");
+  create.release();
+  await tick(20);
+
+  assert.equal(page.socket.sentOfType("message")[0].content, "first message");
+  assert.equal(page.$("#input").value, "next thought");
+});
+
+test("the unsent text of a new chat survives visiting another chat", async () => {
+  const page = await boot();
+  type(page, "an idea");
+  await page.open("Chat A");
+  assert.equal(page.$("#input").value, "");
+  page.click(page.$("#new-chat"));
+  assert.equal(page.$("#input").value, "an idea");
+});
+
+test("a suggestion card sends at once, also in an empty chat, and keeps typed text", async () => {
+  const page = await boot();
+  page.db.messages[1] = [];
+  await page.open("Chat A");
+  type(page, "half typed");
+  page.click(page.$(".hint-button"));
+  await tick(20);
+
+  assert.equal(page.socket.sentOfType("message")[0].conversation_id, 1);
+  assert.equal(page.$("#input").value, "half typed");
+});
+
+test("an older chat opened from search has its own title and joins the list when used", async () => {
+  const now = new Date().toISOString();
+  const chat = (id, title) => ({ conversation_id: id, title, created_at: now, updated_at: now });
+  const page = await boot({
+    db: {
+      pageSize: 2,
+      conversations: [chat(1, "Chat A"), chat(2, "Chat B"), chat(3, "Old chat")],
+      messages: { 3: [{ message_id: 31, conversation_id: 3, role: "user", content: "long ago" }] },
+      searchResults: [{ conversation_id: 3, title: "Old chat", excerpt: "long ago" }],
+    },
+  });
+  fireEvent.change(page.$("#conversation-search"), { target: { value: "long ago" } });
+  fireEvent.submit(page.$("#conversation-search-form"));
+  await tick(20);
+  page.click(page.$(".conversation-search-result"));
+  await tick(20);
+  assert.equal(page.$("#chat-title").textContent, "Old chat");
+
+  await page.send("again");
+  assert.ok(page.sidebarItem("Old chat"));
+});
+
+test("search does not claim there are no matches while searching or after an error", async () => {
+  const search = deferred();
+  const page = await boot({ holds: { "/api/conversations/search": search.promise } });
+  page.db.failSearch = true;
+  fireEvent.change(page.$("#conversation-search"), { target: { value: "x" } });
+  fireEvent.submit(page.$("#conversation-search-form"));
+  await tick();
+  assert.doesNotMatch(page.$("#conversations").textContent, /No matching chats/);
+
+  search.release();
+  await tick(20);
+  assert.match(page.$("#conversation-search-status").textContent, /Search is down/);
+  assert.doesNotMatch(page.$("#conversations").textContent, /No matching chats/);
+});
+
+test("a chat that no longer exists is removed from the search results", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page);
+  await page.open("Chat B"); // the deleted chat is not the one on screen
+  page.db.searchResults = [{ conversation_id: 1, title: "Chat A", excerpt: "gone" }];
+  fireEvent.change(page.$("#conversation-search"), { target: { value: "gone" } });
+  fireEvent.submit(page.$("#conversation-search-form"));
+  await tick(20);
+
+  page.db.missing = [1];
+  page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
+  await tick(20);
+  assert.ok(!page.$(".conversation-search-result"));
+});
+
+test("a chat list that fails to load can be retried", async () => {
+  const list = deferred();
+  const page = await boot({ holds: { "/api/conversations": list.promise } });
+  page.db.failList = true;
+  list.release();
+  await tick(20);
+
+  assert.doesNotMatch(page.$("#sidebar").textContent, /No chats yet/);
+  assert.match(page.$(".sidebar-error").textContent, /Could not load chats/);
+  assert.equal(page.$("#connection").textContent, "Connected");
+
+  page.db.failList = false;
+  page.click(page.$(".sidebar-error .retry"));
+  await tick(20);
+  assert.ok(page.sidebarItem("Chat A"));
+  assert.ok(!page.$(".sidebar-error"));
+});
+
+test("a failed delete does not change the connection status", async () => {
+  const page = await boot();
+  page.db.failDelete = true;
+  page.click(page.sidebarItem("Chat A").querySelector(".conversation-delete"));
+  await tick(20);
+
+  assert.equal(page.$("#connection").textContent, "Connected");
+  assert.match(page.$(".sidebar-error").textContent, /Could not delete/);
+});
+
+test("each date heading appears once", async () => {
+  const today = new Date().toISOString();
+  const old = "2020-01-01 00:00:00";
+  const chat = (id, updated_at) => ({ conversation_id: id, title: `Chat ${id}`, updated_at });
+  const page = await boot({
+    db: { conversations: [chat(1, today), chat(2, old), chat(3, today)], messages: {} },
+  });
+  assert.deepEqual(page.$$(".conversation-group").map((g) => g.textContent), ["Today", "Older"]);
+});
+
+test("deleting the open chat keeps the phone drawer open", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  page.click(page.$("#menu"));
+  page.click(page.sidebarItem("Chat A").querySelector(".conversation-delete"));
+  await tick(20);
+
+  assert.ok(page.$("#chat").classList.contains("sidebar-open"));
+  assert.match(page.threadText(), /question B/);
 });

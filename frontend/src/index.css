@@ -232,6 +232,18 @@ svg.icon {
 
 #conversation-search-status:empty { min-height: 0; margin: 0; }
 
+.sidebar-error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 10px 4px 0;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+}
+
 #conversations {
   flex: 1;
   min-height: 0;

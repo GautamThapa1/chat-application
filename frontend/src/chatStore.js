@@ -148,6 +148,11 @@ export function createChatStore() {
     searchActive: false,
     searchResults: [],
     searchStatus: "",
+    searchPending: false,
+    searchFailed: false,
+    listError: "", // the chat list could not be loaded
+    sidebarError: "", // a sidebar action failed (not a connection problem)
+    blankDraft: "", // unsent text of the blank "new chat" screen
     activeConversationId: null, // null = the blank "new chat" screen
     chats: new Map(),
     input: "", // composer text
@@ -169,6 +174,7 @@ export function createChatStore() {
   let userStateGeneration = 0; // bumped on login/logout so late responses are dropped
   let conversationSearchSequence = 0;
   let creatingConversation = false;
+  let navigation = 0; // bumped whenever the user moves to another chat
   const scroll = { stickToBottom: true }; // auto-scroll only while at the bottom
 
   /**
@@ -347,6 +353,11 @@ export function createChatStore() {
     state.searchResults = [];
     state.searchQuery = "";
     state.searchStatus = "";
+    state.searchPending = false;
+    state.searchFailed = false;
+    state.listError = "";
+    state.sidebarError = "";
+    state.blankDraft = "";
     state.activeConversationId = null;
     state.blankError = "";
     signedIn = false;
@@ -777,6 +788,7 @@ export function createChatStore() {
       chat.messages = result.data.messages;
       chat.loaded = true;
       chat.loadError = "";
+      chat.conversation = result.data.conversation;
       updateConversationInList(result.data.conversation);
       const saved = (m) => m.role === "user" && m.content === finished.prompt
         && !before.has(m.message_id);
@@ -843,25 +855,29 @@ export function createChatStore() {
       ...state.conversations,
       ...items.filter((item) => !known.has(item.conversation_id)),
     ];
+    sortConversations(); // out-of-order rows would repeat date headings
   }
 
   async function loadConversations() {
     const generation = userStateGeneration;
     state.conversationsLoading = true;
+    state.listError = "";
     emit();
     try {
       const result = await api(`/api/conversations?limit=${CONVERSATION_PAGE_SIZE}&offset=0`);
       if (generation !== userStateGeneration) return;
       if (!result.ok) {
         if (result.status === 401) showAuth("Your session has ended. Please log in again.");
-        else setConnection("Could not load chats", "error");
+        else state.listError = `Could not load chats: ${errorMessage(result.data)}`;
         return;
       }
       appendConversations(result.data.conversations);
       state.conversationOffset = result.data.pagination.offset + result.data.conversations.length;
       state.conversationTotalCount = result.data.pagination.total_count;
     } catch {
-      if (generation === userStateGeneration) setConnection("Could not load chats", "error");
+      if (generation === userStateGeneration) {
+        state.listError = "Could not load chats: the server cannot be reached.";
+      }
     } finally {
       if (generation === userStateGeneration) {
         state.conversationsLoading = false;
@@ -915,16 +931,19 @@ export function createChatStore() {
     state.searchResults = [];
     state.searchQuery = "";
     state.searchStatus = "";
+    state.searchPending = false;
+    state.searchFailed = false;
   }
 
   function saveDraft() {
     const chat = activeChat();
     if (chat) chat.draft = state.input;
+    else state.blankDraft = state.input;
   }
 
   function restoreDraft() {
     const chat = activeChat();
-    state.input = chat ? chat.draft : "";
+    state.input = chat ? chat.draft : state.blankDraft;
   }
 
   // Switching only changes which conversation is DISPLAYED. It does not touch
@@ -937,6 +956,11 @@ export function createChatStore() {
       return;
     }
     saveDraft();
+    navigation += 1;
+    showConversation(conversationId);
+  }
+
+  function showConversation(conversationId) {
     state.activeConversationId = conversationId;
     state.blankError = "";
     restoreDraft();
@@ -958,9 +982,10 @@ export function createChatStore() {
       return;
     }
     saveDraft();
+    navigation += 1;
     state.activeConversationId = null;
     state.blankError = "";
-    state.input = "";
+    restoreDraft();
     emit();
   }
 
@@ -973,6 +998,7 @@ export function createChatStore() {
     if (creatingConversation) return null;
     creatingConversation = true;
     const generation = userStateGeneration;
+    const startedAt = navigation;
     try {
       const result = await api("/api/conversations", "POST", { title: DEFAULT_TITLE });
       if (generation !== userStateGeneration) return null;
@@ -990,8 +1016,12 @@ export function createChatStore() {
       state.conversationTotalCount += 1;
       const chat = chatState(created.conversation_id);
       chat.loaded = true; // brand new: nothing to fetch
-      state.activeConversationId = created.conversation_id;
-      state.blankError = "";
+      // Show it only if the user is still waiting for it.
+      if (navigation === startedAt) {
+        state.activeConversationId = created.conversation_id;
+        state.blankError = "";
+      }
+      emit();
       return created.conversation_id;
     } catch {
       if (generation === userStateGeneration) {
@@ -1012,20 +1042,27 @@ export function createChatStore() {
     if (running) {
       wsSend({ type: "cancel", request_id: running.requestId, conversation_id: conversationId });
     }
+    state.sidebarError = "";
+    emit();
     try {
       const result = await api(`/api/conversations/${conversationId}`, "DELETE");
       if (generation !== userStateGeneration) return;
       if (!result.ok) {
         if (result.status === 401) showAuth("Your session has ended. Please log in again.");
-        else setConnection(errorMessage(result.data), "error");
+        else showSidebarError(errorMessage(result.data));
         return;
       }
       dropConversation(conversationId);
     } catch {
       if (generation === userStateGeneration) {
-        setConnection("Could not reach the server to delete this chat.", "error");
+        showSidebarError("Could not reach the server to delete this chat.");
       }
     }
+  }
+
+  function showSidebarError(text) {
+    state.sidebarError = text;
+    emit();
   }
 
   // Remove a conversation from the screen and from memory.
@@ -1033,17 +1070,21 @@ export function createChatStore() {
     const wasListed = state.conversations.some((c) => c.conversation_id === conversationId);
     state.conversations = state.conversations.filter((c) => c.conversation_id !== conversationId);
     state.chats.delete(conversationId);
+    state.searchResults = state.searchResults.filter((r) => r.conversation_id !== conversationId);
+    if (state.searchActive) state.searchStatus = matchCount(state.searchResults.length);
     if (wasListed) {
       if (state.conversationOffset > 0) state.conversationOffset -= 1;
       state.conversationTotalCount = Math.max(0, state.conversationTotalCount - 1);
     }
     if (state.activeConversationId === conversationId) {
+      navigation += 1;
       state.activeConversationId = null;
-      state.input = "";
+      // Not selectConversation: the drawer and search stay as they are.
       if (state.conversations.length) {
-        selectConversation(state.conversations[0].conversation_id);
+        showConversation(state.conversations[0].conversation_id);
         return;
       }
+      restoreDraft();
     }
     emit();
   }
@@ -1069,28 +1110,25 @@ export function createChatStore() {
     emit();
   }
 
-  /** Returns true when the message was sent. */
+  /** Returns the id of the conversation the message was sent to, or null. */
   async function submitMessage(rawText) {
     const text = rawText.trim();
-    if (!text) return false;
+    if (!text) return null;
 
     if (!socketIsOpen()) {
       notifyActive(NOT_CONNECTED, true);
-      return false;
+      return null;
     }
-    if (state.activeConversationId === null) {
-      const id = await createConversation();
-      if (id === null) return false;
-      emit();
-    }
-    const chat = activeChat();
+    // Fixed now: the user may look at another chat while one is being created.
+    const conversationId = state.activeConversationId ?? await createConversation();
+    if (conversationId === null) return null;
+    const chat = chatState(conversationId);
     if (chat.generation) {
       setNotice(chat, WAIT_FOR_REPLY);
       emit();
-      return false;
+      return null;
     }
 
-    const conversationId = state.activeConversationId;
     const requestId = newRequestId();
     const sent = wsSend({
       type: "message",
@@ -1100,11 +1138,16 @@ export function createChatStore() {
     });
     if (!sent) {
       notifyActive(NOT_CONNECTED, true);
-      return false;
+      return null;
     }
 
     // Show a title right away; the server confirms it when the reply is saved.
-    const listed = state.conversations.find((c) => c.conversation_id === conversationId);
+    let listed = state.conversations.find((c) => c.conversation_id === conversationId);
+    if (!listed && chat.conversation) { // an older chat, opened from search
+      listed = { ...chat.conversation };
+      state.conversations = [...state.conversations, listed];
+      state.conversationOffset += 1; // it is now the newest on the server
+    }
     if (listed && (!listed.title || listed.title === DEFAULT_TITLE) && chat.messages.length === 0) {
       listed.title = shortTitle(text);
     }
@@ -1112,18 +1155,27 @@ export function createChatStore() {
     sortConversations();
 
     startGeneration(chat, { requestId, mode: "message", prompt: text });
-    return true;
+    return conversationId;
   }
 
   async function submitComposer() {
-    if (!state.input.trim()) return;
-    if (await submitMessage(state.input)) clearComposer();
+    const text = state.input;
+    const source = state.activeConversationId;
+    if (!text.trim()) return;
+    const target = await submitMessage(text);
+    if (target !== null) clearSent(text, [source, target]);
   }
 
-  function clearComposer() {
-    state.input = "";
-    const chat = activeChat();
-    if (chat) chat.draft = "";
+  // Remove the text that was just sent, and nothing typed since.
+  function clearSent(text, ids) {
+    if (ids.includes(state.activeConversationId) && state.input === text) state.input = "";
+    for (const id of ids) {
+      if (id === null) {
+        if (state.blankDraft === text) state.blankDraft = "";
+      } else if (state.chats.get(id)?.draft === text) {
+        state.chats.get(id).draft = "";
+      }
+    }
     emit();
   }
 
@@ -1224,14 +1276,11 @@ export function createChatStore() {
     emit();
   }
 
-  function useHint(prompt) {
-    state.input = prompt;
-    // With no open chat the hint starts one right away.
-    if (state.activeConversationId === null) {
-      emit();
-      void submitMessage(prompt).then((ok) => { if (ok) clearComposer(); });
-    } else {
-      focusInput();
+  // A suggestion card sends at once and leaves the composer alone.
+  async function useHint(prompt) {
+    const sent = await submitMessage(prompt);
+    if (sent === null && !state.input) {
+      state.input = prompt;
       emit();
     }
   }
@@ -1267,8 +1316,14 @@ export function createChatStore() {
       state.searchActive = false;
       state.searchResults = [];
       state.searchStatus = "";
+      state.searchPending = false;
+      state.searchFailed = false;
     }
     emit();
+  }
+
+  function matchCount(count) {
+    return `${count} matching ${count === 1 ? "chat" : "chats"}`;
   }
 
   async function searchPastConversations() {
@@ -1283,6 +1338,8 @@ export function createChatStore() {
     state.searchActive = true;
     state.searchResults = [];
     state.searchStatus = "Searching…";
+    state.searchPending = true;
+    state.searchFailed = false;
     emit();
     try {
       const result = await api("/api/conversations/search", "POST", {
@@ -1293,15 +1350,20 @@ export function createChatStore() {
       if (!result.ok) {
         if (result.status === 401) showAuth("Your session has ended. Please log in again.");
         else state.searchStatus = errorMessage(result.data);
+        state.searchPending = false;
+        state.searchFailed = true;
         emit();
         return;
       }
       state.searchResults = result.data.results || [];
-      state.searchStatus = `${state.searchResults.length} matching chats`;
+      state.searchStatus = matchCount(state.searchResults.length);
+      state.searchPending = false;
       emit();
     } catch {
       if (generation === userStateGeneration && sequence === conversationSearchSequence) {
         state.searchStatus = "Could not search past chats.";
+        state.searchPending = false;
+        state.searchFailed = true;
         emit();
       }
     }
@@ -1331,6 +1393,7 @@ export function createChatStore() {
       startNewChat,
       deleteConversation,
       loadMoreConversations,
+      loadConversations,
       setSearchQuery,
       searchPastConversations,
       openSidebar,

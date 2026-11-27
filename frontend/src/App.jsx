@@ -12,9 +12,12 @@ function ChatApp() {
   const { state, actions } = useStore();
   const listed = state.conversations.find((c) => c.conversation_id === state.activeConversationId);
 
+  // A chat opened from search may be older than the loaded list.
+  const title = listed?.title || state.chats.get(state.activeConversationId)?.conversation?.title;
+
   useEffect(() => {
-    document.title = listed?.title ? `${listed.title} · Luma` : "Luma Chat";
-  }, [listed?.title]);
+    document.title = title ? `${title} · Luma` : "Luma Chat";
+  }, [title]);
 
   return (
     <div id="chat" className={`app${state.sidebarOpen ? " sidebar-open" : ""}`}>
@@ -25,7 +28,7 @@ function ChatApp() {
           <button id="menu" className="icon-button" type="button" aria-label="Open conversations" onClick={actions.openSidebar}>
             <Icon name="menu" />
           </button>
-          <h1 id="chat-title">{listed?.title || DEFAULT_TITLE}</h1>
+          <h1 id="chat-title">{title || DEFAULT_TITLE}</h1>
         </header>
         <Thread />
         <Composer />
