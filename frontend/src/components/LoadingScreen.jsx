@@ -1,4 +1,5 @@
 import { useStore } from "../StoreContext.js";
+import Spinner from "./Spinner.jsx";
 
 /** Full-page progress, for the moments between the login screen and the chat. */
 export default function LoadingScreen() {
@@ -11,7 +12,7 @@ export default function LoadingScreen() {
           <span>Luma Chat</span>
         </div>
         <div className="loading-status" role="status">
-          {!state.loadingFailed && <span className="spinner" aria-hidden="true" />}
+          {!state.loadingFailed && <Spinner />}
           <span>{state.loadingLabel}</span>
         </div>
         {state.loadingFailed && (

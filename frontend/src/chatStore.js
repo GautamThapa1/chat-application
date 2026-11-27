@@ -175,6 +175,7 @@ export function createChatStore() {
     inputFocusSeq: 0,
     blankError: "", // an error shown on the blank "new chat" screen
     sidebarOpen: false,
+    confirm: null, // {message, action} while a dialog is open
     reminders: { visible: false, enabled: false, busy: false, status: "" },
   };
 
@@ -241,6 +242,28 @@ export function createChatStore() {
 
   function focusInput() {
     state.inputFocusSeq += 1;
+  }
+
+  // ---------- Confirmation dialog ----------
+  let resolveConfirm = null;
+
+  /** Resolves to true only if the user presses the `action` button. */
+  function askConfirm(message, action) {
+    answerConfirm(false); // never leave an earlier question waiting
+    return new Promise((resolve) => {
+      resolveConfirm = resolve;
+      state.confirm = { message, action };
+      emit();
+    });
+  }
+
+  function answerConfirm(answer) {
+    if (!resolveConfirm) return;
+    const resolve = resolveConfirm;
+    resolveConfirm = null;
+    state.confirm = null;
+    emit();
+    resolve(answer);
   }
 
   // ---------- Task reminders (Web Push) ----------
@@ -368,6 +391,7 @@ export function createChatStore() {
 
   function clearUserState() {
     userStateGeneration += 1;
+    answerConfirm(false);
     closeSocket();
     state.chats.clear();
     state.conversations = [];
@@ -1100,7 +1124,7 @@ export function createChatStore() {
   }
 
   async function deleteConversation(conversationId) {
-    if (!window.confirm("Delete this chat? This cannot be undone.")) return;
+    if (!await askConfirm("Delete this chat? This cannot be undone.", "Delete")) return;
     const generation = userStateGeneration;
     // Stop a running reply first so the server does not try to save into a
     // conversation that no longer exists.
@@ -1303,10 +1327,13 @@ export function createChatStore() {
   }
 
   // Regenerate: write a new answer for an existing assistant message.
-  function regenerate(chat, message, isLast) {
-    if (!isLast && !window.confirm(
+  async function regenerate(chat, message, isLast) {
+    if (!isLast && !await askConfirm(
       "Regenerating replaces this answer and removes the messages after it. Continue?",
+      "Regenerate",
     )) return;
+    // Things may have moved on while the dialog was open.
+    if (chat.generation || chat !== activeChat()) return;
     const requestId = newRequestId();
     const sent = wsSend({
       type: "message",
@@ -1480,6 +1507,7 @@ export function createChatStore() {
       saveEdit,
       regenerate,
       undoMemory,
+      answerConfirm,
       reloadConversation,
     },
     // Exposed for tests and shutdown.

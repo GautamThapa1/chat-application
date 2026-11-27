@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../StoreContext.js";
+import Spinner from "./Spinner.jsx";
 
 export default function AuthScreen() {
   const { state, actions } = useStore();
@@ -57,7 +58,7 @@ export default function AuthScreen() {
           </label>
           <p id="auth-error" className="auth-error" role="alert">{state.authError}</p>
           <button id="auth-submit" className="button primary" type="submit" disabled={busy}>
-            {busy && <span className="spinner" aria-hidden="true" />}
+            {busy && <Spinner />}
             {busy ? busyLabel : idleLabel}
           </button>
         </form>

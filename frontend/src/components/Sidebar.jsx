@@ -1,6 +1,8 @@
 import { DEFAULT_TITLE, groupLabel } from "../chatStore.js";
 import { useStore } from "../StoreContext.js";
 import Icon from "./Icon.jsx";
+import Notice from "./Notice.jsx";
+import Spinner from "./Spinner.jsx";
 
 function ConversationList() {
   const { state, actions } = useStore();
@@ -28,7 +30,7 @@ function ConversationList() {
     if (state.conversationsLoading) {
       return (
         <p className="conversation-empty" role="status">
-          <span className="spinner" aria-hidden="true" /> Loading chats…
+          <Spinner /> Loading chats…
         </p>
       );
     }
@@ -59,7 +61,7 @@ function ConversationList() {
           <span className="conversation-title">{title}</span>
           {/* A spinner marks chats that are still generating in the background. */}
           {state.chats.get(id)?.generation && (
-            <span className="spinner" role="status" aria-label="Generating a reply" />
+            <Spinner label="Generating a reply" />
           )}
         </button>
         <button
@@ -86,7 +88,7 @@ export default function Sidebar() {
       <div className="sidebar-top">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">✳</div>
-          <span>Luma</span>
+          <span>Luma Chat</span>
         </div>
       </div>
       <button id="new-chat" className="new-chat" type="button" onClick={actions.startNewChat}>
@@ -111,23 +113,30 @@ export default function Sidebar() {
           value={state.searchQuery}
           onChange={(e) => actions.setSearchQuery(e.target.value)}
         />
-        <button type="submit">Search</button>
+        <button type="submit" className="button secondary">Search</button>
       </form>
-      <p id="conversation-search-status" role="status" aria-live="polite">{state.searchStatus}</p>
+      <p
+        id="conversation-search-status"
+        className={state.searchFailed ? "notice error" : undefined}
+        role="status"
+        aria-live="polite"
+      >
+        {state.searchStatus}
+      </p>
       {state.listError && (
-        <div className="sidebar-error" role="alert">
-          <span>{state.listError}</span>
-          <button type="button" className="link-button retry" onClick={() => void actions.loadConversations()}>
-            Retry
-          </button>
+        <div className="sidebar-error">
+          <Notice error onRetry={() => void actions.loadConversations()}>{state.listError}</Notice>
         </div>
       )}
-      {state.sidebarError && <div className="sidebar-error" role="alert">{state.sidebarError}</div>}
+      {state.sidebarError && (
+        <div className="sidebar-error"><Notice error>{state.sidebarError}</Notice></div>
+      )}
       <nav id="conversations" aria-label="Conversations">
         <ConversationList />
       </nav>
       <button
         id="load-more-conversations"
+        className="button ghost"
         type="button"
         hidden={state.searchActive || state.conversationOffset >= state.conversationTotalCount}
         disabled={state.conversationsLoading}
@@ -137,6 +146,7 @@ export default function Sidebar() {
       </button>
       <button
         id="enable-task-reminders"
+        className="button secondary"
         type="button"
         hidden={!reminders.visible}
         disabled={reminders.busy}

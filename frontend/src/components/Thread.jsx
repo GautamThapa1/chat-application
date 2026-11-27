@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PROMPT_HINTS, isVisibleMemoryResult } from "../chatStore.js";
 import { useStore } from "../StoreContext.js";
 import Icon from "./Icon.jsx";
+import Notice from "./Notice.jsx";
+import Spinner from "./Spinner.jsx";
 
 function ActionButton({ label, icon, onClick, disabled, title }) {
   return (
@@ -181,16 +183,9 @@ function ToolResults({ chat }) {
 function LoadError({ chat }) {
   const { state, actions } = useStore();
   return (
-    <div className="notice error" role="alert">
-      <span>{chat.loadError}</span>
-      <button
-        type="button"
-        className="link-button retry"
-        onClick={() => actions.reloadConversation(state.activeConversationId)}
-      >
-        Retry
-      </button>
-    </div>
+    <Notice error onRetry={() => actions.reloadConversation(state.activeConversationId)}>
+      {chat.loadError}
+    </Notice>
   );
 }
 
@@ -214,7 +209,6 @@ function EmptyState() {
 
 function ThreadContent() {
   const store = useStore();
-  const { state } = store;
   const chat = store.activeChat();
 
   if (!chat) return <EmptyState />;
@@ -222,7 +216,7 @@ function ThreadContent() {
   if (!chat.loaded && !chat.messages.length) {
     return chat.loadError
       ? <LoadError chat={chat} />
-      : <div className="notice">Loading chat…</div>;
+      : <Notice><Spinner /> Loading chat…</Notice>;
   }
 
   const gen = chat.generation;
@@ -263,10 +257,7 @@ function ThreadContent() {
       {/* Always after the reply, so it does not move when the reply is saved. */}
       {chat.toolResults.some(isVisibleMemoryResult) && <ToolResults chat={chat} />}
       {chat.loadError && <LoadError chat={chat} />}
-      {chat.notice && (
-        <div className={chat.noticeIsError ? "notice error" : "notice"}>{chat.notice}</div>
-      )}
-      {state.blankError && <div className="notice error">{state.blankError}</div>}
+      {chat.notice && <Notice error={chat.noticeIsError}>{chat.notice}</Notice>}
     </>
   );
 }
@@ -295,9 +286,7 @@ export default function Thread() {
     >
       <div id="thread" className="thread" aria-live="polite">
         <ThreadContent />
-        {!chat && store.state.blankError && (
-          <div className="notice error">{store.state.blankError}</div>
-        )}
+        {!chat && store.state.blankError && <Notice error>{store.state.blankError}</Notice>}
       </div>
     </div>
   );

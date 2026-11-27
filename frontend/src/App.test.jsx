@@ -59,7 +59,6 @@ async function boot({ username = "Gautam", db, modules, signedOut = false, holds
     sentOfType(type) { return this.sent.filter((m) => m.type === type); }
   }
   vi.stubGlobal("WebSocket", FakeWebSocket);
-  vi.stubGlobal("confirm", () => true);
 
   const now = new Date().toISOString();
   db ??= {
@@ -180,6 +179,12 @@ async function boot({ username = "Gautam", db, modules, signedOut = false, holds
     window, db, sockets, store, $, $$, click,
     get socket() { return sockets[sockets.length - 1]; },
     threadText: () => $("#thread").textContent,
+    /** Click the delete button of a chat and agree in the dialog. */
+    async remove(title) {
+      click(page.sidebarItem(title).querySelector(".conversation-delete"));
+      click($(".dialog .confirm"));
+      await tick(20);
+    },
     sidebarItem: (title) => $$(".conversation-item").find((i) => i.textContent.includes(title)),
     async open(title) {
       click(page.sidebarItem(title).querySelector(".conversation-select"));
@@ -994,8 +999,7 @@ test("a chat list that fails to load can be retried", async () => {
 test("a failed delete does not change the connection status", async () => {
   const page = await boot();
   page.db.failDelete = true;
-  page.click(page.sidebarItem("Chat A").querySelector(".conversation-delete"));
-  await tick(20);
+  await page.remove("Chat A");
 
   assert.equal(page.$("#connection").textContent, "Connected");
   assert.match(page.$(".sidebar-error").textContent, /Could not delete/);
@@ -1015,8 +1019,7 @@ test("deleting the open chat keeps the phone drawer open", async () => {
   const page = await boot();
   await page.open("Chat A");
   page.click(page.$("#menu"));
-  page.click(page.sidebarItem("Chat A").querySelector(".conversation-delete"));
-  await tick(20);
+  await page.remove("Chat A");
 
   assert.ok(page.$("#chat").classList.contains("sidebar-open"));
   assert.match(page.threadText(), /question B/);
@@ -1185,4 +1188,81 @@ test("on a touch screen Enter adds a new line instead of sending", async () => {
   assert.equal(notCancelled, true);
   assert.equal(page.socket.sentOfType("message").length, 0);
   assert.ok(!page.$(".composer-note"));
+});
+
+const askToDelete = (page, title) => {
+  const button = page.sidebarItem(title).querySelector(".conversation-delete");
+  button.focus();
+  page.click(button);
+  return button;
+};
+
+test("deleting asks first in an in-app dialog, and Cancel keeps the chat", async () => {
+  const page = await boot();
+  askToDelete(page, "Chat A");
+  assert.match(page.$(".dialog").textContent, /Delete this chat\?/);
+  assert.equal(document.activeElement, page.$(".dialog .cancel"), "the safe choice is focused");
+
+  page.click(page.$(".dialog .cancel"));
+  await tick(20);
+  assert.ok(!page.$(".dialog"));
+  assert.ok(page.sidebarItem("Chat A"));
+  assert.ok(!page.db.calls.includes("DELETE /api/conversations/1"));
+});
+
+test("Escape closes the dialog and returns focus", async () => {
+  const page = await boot();
+  const button = askToDelete(page, "Chat A");
+  fireEvent.keyDown(page.$(".dialog"), { key: "Escape" });
+  await tick(20);
+
+  assert.ok(!page.$(".dialog"));
+  assert.equal(document.activeElement, button);
+  assert.ok(page.sidebarItem("Chat A"));
+});
+
+test("confirming the dialog deletes the chat", async () => {
+  const page = await boot();
+  await page.remove("Chat A");
+
+  assert.ok(!page.sidebarItem("Chat A"));
+  assert.ok(page.db.calls.includes("DELETE /api/conversations/1"));
+});
+
+test("regenerating an earlier answer asks first", async () => {
+  const page = await boot();
+  page.db.messages[1].push(
+    { message_id: 13, conversation_id: 1, role: "user", content: "more" },
+    { message_id: 14, conversation_id: 1, role: "assistant", content: "more answer" },
+  );
+  await page.open("Chat A");
+  page.click(page.buttons("Regenerate")[0]);
+  assert.match(page.$(".dialog").textContent, /removes the messages after it/);
+  assert.equal(page.socket.sentOfType("message").length, 0);
+
+  page.click(page.$(".dialog .confirm"));
+  await tick(20);
+  assert.equal(page.socket.sentOfType("message")[0].assistant_message_id, 12);
+});
+
+test("Escape closes the phone drawer", async () => {
+  const page = await boot();
+  page.click(page.$("#menu"));
+  fireEvent.keyDown(document, { key: "Escape" });
+
+  assert.ok(!page.$("#chat").classList.contains("sidebar-open"));
+});
+
+test("a loading chat shows the same spinner as other loading states", async () => {
+  const chat = deferred();
+  const page = await boot({ holds: { "/api/conversations/1": chat.promise } });
+  await page.open("Chat A");
+
+  assert.ok(page.$("#thread .spinner"));
+  assert.match(page.threadText(), /Loading chat…/);
+});
+
+test("the app has one name", async () => {
+  const page = await boot();
+  assert.equal(page.$("#sidebar .brand span").textContent, "Luma Chat");
 });

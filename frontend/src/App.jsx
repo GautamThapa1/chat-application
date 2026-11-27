@@ -3,6 +3,7 @@ import { DEFAULT_TITLE } from "./chatStore.js";
 import { useStore } from "./StoreContext.js";
 import AuthScreen from "./components/AuthScreen.jsx";
 import Composer from "./components/Composer.jsx";
+import ConfirmDialog from "./components/ConfirmDialog.jsx";
 import Icon from "./components/Icon.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
 import Sidebar from "./components/Sidebar.jsx";
@@ -19,6 +20,15 @@ function ChatApp() {
     document.title = title ? `${title} · Luma` : "Luma Chat";
   }, [title]);
 
+  useEffect(() => {
+    if (!state.sidebarOpen) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") actions.closeSidebar();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [state.sidebarOpen, actions]);
+
   return (
     <div id="chat" className={`app${state.sidebarOpen ? " sidebar-open" : ""}`}>
       <div id="scrim" className="scrim" onClick={actions.closeSidebar} />
@@ -33,6 +43,7 @@ function ChatApp() {
         <Thread />
         <Composer />
       </section>
+      {state.confirm && <ConfirmDialog />}
     </div>
   );
 }
