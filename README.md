@@ -10,7 +10,7 @@ A modern AI-powered chat application built with **Python, FastAPI, and Google Ge
 - **User Authentication** — Secure registration, login, and session management.
 - **Chat History** — Create, manage, delete, and semantically search conversations.
 - **Notes Management** — Save, search, and retrieve personal notes.
-- **Long-Term Memory** — Automatically retain useful, stable user context separately from notes, retrieve it when relevant, and undo a newly saved memory.
+- **Long-Term Memory** — Save user context when you ask Luma to remember it (separately from notes), retrieve it when relevant, and undo a newly saved memory.
 - **Task Management** — Create, list, reschedule, complete, and delete tasks; clearing all tasks requires explicit confirmation.
 - **Task Reminders** — Optional Web Push reminders 15 minutes before task deadlines, including when the app is closed.
 - **Gemini Function Calling** — Execute note, memory, and task actions; clearing notes or tasks requires explicit confirmation.

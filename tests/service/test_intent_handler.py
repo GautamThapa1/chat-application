@@ -484,3 +484,13 @@ def test_every_tool_that_changes_data_is_blocked_without_write_permission():
             control=TurnControl(allow_writes=False),
         )
         assert result.response["error"].startswith("Changes are blocked")
+
+
+def test_memory_saving_requires_an_explicit_request():
+    declaration = next(
+        d for d in gemini_chat.FUNCTION_DECLARATIONS if d.name == "save_memory"
+    )
+    prompt = " ".join(gemini_chat.SYSTEM_INSTRUCTION.split())
+    assert "only when the user explicitly asks" in prompt
+    assert "without waiting for an explicit request" not in prompt
+    assert "only when the user explicitly asks" in declaration.description
