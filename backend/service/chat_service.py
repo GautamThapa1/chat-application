@@ -37,21 +37,17 @@ def _load_history_for_mode(
         raise db.ConversationNotFound
 
     if mode == "edit":
-        success, message = db.edit_conversation_message(
+        # Nothing is written until the new reply is complete.
+        message = request.message.strip()
+        if not message:
+            raise ValueError("Message content must not be empty.")
+        success, history = db.get_edit_context(
             user_id,
             request.conversation_id,
             request.message_id,
-            request.message,
         )
         if not success:
             raise _ConversationMessageNotFound("Message not found.")
-        history = [
-            {"role": row["role"], "content": row["content"]}
-            for row in db.get_conversation_messages(
-                user_id, request.conversation_id
-            )
-            if row["id"] != request.message_id
-        ]
         return message, history, None
 
     if mode == "regenerate":
@@ -222,7 +218,17 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             if not full_text:
                 raise ValueError("Gemini returned an empty response.")
 
-            if replace_assistant_id is not None:
+            if mode == "edit":
+                if not db.replace_edited_turn(
+                    user_id,
+                    request.conversation_id,
+                    request.message_id,
+                    message,
+                    full_text,
+                    request.request_id,
+                ):
+                    raise ValueError("Could not save the edited message.")
+            elif replace_assistant_id is not None:
                 replaced = db.replace_assistant_response(
                     user_id,
                     request.conversation_id,
@@ -247,7 +253,8 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             )
         except (GeneratorExit, TurnStopped) as stop:
             partial = "".join(chunks)
-            if partial and mode != "regenerate":
+            # A stopped edit or regeneration leaves the history as it was.
+            if partial and mode == "message":
                 try:
                     db.save_conversation(
                         user_id,

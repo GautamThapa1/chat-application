@@ -1282,3 +1282,17 @@ test("a reply saved just before it is announced is not treated as lost", async (
   assert.equal(page.$("#input").value, "");
   assert.doesNotMatch(page.threadText(), /back in the box/);
 });
+
+test("a stopped edit reopens the edit box with the new text", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  page.click(page.buttons("Edit")[0]);
+  fireEvent.change(page.$(".edit-box textarea"), { target: { value: "reworded" } });
+  page.click(page.$(".edit-box .button.primary"));
+  const { request_id } = page.socket.sentOfType("message").at(-1);
+
+  page.socket.serverSend({ type: "cancelled", conversation_id: 1, request_id });
+  await tick(20);
+
+  assert.equal(page.$(".edit-box textarea").value, "reworded");
+});

@@ -392,3 +392,31 @@ def test_timeouts_end_with_an_error_and_save_nothing(chat_setup, monkeypatch, li
 
     assert events[-1].WhichOneof("payload") == "error"
     assert db.get_conversation_messages(user_id, conversation_id) == []
+
+
+@pytest.mark.parametrize("outcome", ["failed", "stopped", "blank"])
+def test_unsuccessful_edit_keeps_the_original_messages(chat_setup, outcome):
+    user_id, token, conversation_id, handler_for = chat_setup
+    db.save_conversation(user_id, conversation_id, "Original", "Old answer", "seed")
+    before = db.get_conversation_messages(user_id, conversation_id)
+    failure = RuntimeError("down") if outcome == "failed" else None
+    context = _Context(token)
+    events = handler_for(_GeminiClient([_chunk("Partial")], failure=failure)).unary_stream(
+        _request(conversation_id, message="   " if outcome == "blank" else "Edited",
+                 request_id="edit", mode="edit", message_id=before[0]["id"]),
+        context,
+    )
+
+    if outcome == "failed":
+        list(events)
+    elif outcome == "blank":
+        with pytest.raises(_Abort):
+            list(events)
+    else:
+        next(events)
+        next(events)
+        context.cancel()
+        with pytest.raises(GeneratorExit):
+            next(events)
+
+    assert db.get_conversation_messages(user_id, conversation_id) == before

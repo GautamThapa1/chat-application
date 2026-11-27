@@ -759,11 +759,16 @@ export function createChatStore() {
         break;
 
       case "complete":
-      case "cancelled":
+      case "cancelled": {
         if (gen !== null && !isCurrent) break; // an old reply's event: ignore
         if (msg.type === "cancelled") setNotice(chat, STOPPED);
-        finishGeneration(conversationId);
+        const loading = finishGeneration(conversationId);
+        // A stopped edit changed nothing: offer the new text again.
+        if (msg.type === "cancelled" && gen?.mode === "edit") {
+          void loading.then(() => reopenRejectedEdit(chat, gen));
+        }
         break;
+      }
 
       case "error":
         if (gen !== null && !isCurrent) break;
@@ -812,8 +817,9 @@ export function createChatStore() {
     const chat = chatState(conversationId);
     if (chat.generation) chat.generation.finishing = true;
     if (chat.notice === WAIT_FOR_REPLY) setNotice(chat, "");
-    void loadMessages(conversationId);
+    const loading = loadMessages(conversationId);
     emit();
+    return loading;
   }
 
   // Put text that never reached the database back where the user can resend it,

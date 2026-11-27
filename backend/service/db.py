@@ -758,6 +758,101 @@ def get_regeneration_context(
         conn.close()
 
 
+def get_edit_context(
+    user_id: int,
+    conversation_id: int,
+    message_id: int,
+) -> tuple[bool, list[dict]]:
+    """History before one of the user's own messages. Changes nothing."""
+    conn = get_connection()
+    try:
+        target = conn.execute(
+            """SELECT 1 FROM messages
+                WHERE message_id = ? AND conversation_id = ?
+                  AND user_id = ? AND role = 'user'""",
+            (message_id, conversation_id, user_id),
+        ).fetchone()
+        if target is None:
+            return False, []
+        history = conn.execute(
+            """SELECT role, content
+                 FROM messages
+                WHERE conversation_id = ? AND user_id = ? AND message_id < ?
+                ORDER BY message_id""",
+            (conversation_id, user_id, message_id),
+        ).fetchall()
+        return True, [dict(row) for row in history]
+    finally:
+        conn.close()
+
+
+def replace_edited_turn(
+    user_id: int,
+    conversation_id: int,
+    message_id: int,
+    content: str,
+    response: str,
+    request_id: str = "",
+) -> bool:
+    """Save a finished edit: new text, new reply, later messages removed."""
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if request_id:
+                existing = conn.execute(
+                    """SELECT 1 FROM conversation_response_requests
+                        WHERE conversation_id = ? AND user_id = ? AND request_id = ?""",
+                    (conversation_id, user_id, request_id),
+                ).fetchone()
+                if existing is not None:
+                    return True
+
+            target = conn.execute(
+                """SELECT 1 FROM messages
+                    WHERE message_id = ? AND conversation_id = ?
+                      AND user_id = ? AND role = 'user'""",
+                (message_id, conversation_id, user_id),
+            ).fetchone()
+            if target is None:
+                return False
+
+            conn.execute(
+                """DELETE FROM messages
+                  WHERE conversation_id = ? AND user_id = ?
+                    AND message_id > ?""",
+                (conversation_id, user_id, message_id),
+            )
+            conn.execute(
+                """UPDATE messages SET content = ?
+                  WHERE message_id = ? AND conversation_id = ? AND user_id = ?""",
+                (content, message_id, conversation_id, user_id),
+            )
+            conn.execute(
+                """INSERT INTO messages
+                   (conversation_id, user_id, role, content)
+                   VALUES (?, ?, 'assistant', ?)""",
+                (conversation_id, user_id, response),
+            )
+            if request_id:
+                conn.execute(
+                    """INSERT INTO conversation_response_requests
+                       (conversation_id, user_id, request_id)
+                       VALUES (?, ?, ?)""",
+                    (conversation_id, user_id, request_id),
+                )
+            conn.execute(
+                """UPDATE conversations SET updated_at = CURRENT_TIMESTAMP
+                  WHERE conversation_id = ? AND user_id = ?""",
+                (conversation_id, user_id),
+            )
+            _delete_conversation_embedding_index(conn, conversation_id)
+            _queue_conversation_embedding(conn, user_id, conversation_id)
+            return True
+    finally:
+        conn.close()
+
+
 def replace_assistant_response(
     user_id: int,
     conversation_id: int,

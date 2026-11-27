@@ -560,3 +560,9 @@ async def test_concurrent_generations_have_independent_trace_ids():
     await asyncio.wait_for(task, timeout=1)
     await wait_until(lambda: hub.get(1, 3) is None and hub.get(1, 4) is None)
     assert get_trace_id() == "-"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_edit_saves_nothing():
+    stub = endless_stream(started(), chunk("partial", 0))
+    assert await stop_reply(stub, LiveWebSocket(), mode="edit", message_id=11) == []

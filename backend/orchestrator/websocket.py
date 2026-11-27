@@ -178,9 +178,10 @@ async def _save_stopped_reply(gen: Generation, stub) -> None:
 
     The service saves it too, but only once its blocking model read returns,
     which can be after the browser has already reloaded. The shared request_id
-    makes the second save a no-op. A stopped regeneration keeps the old answer.
+    makes the second save a no-op. A stopped edit or regeneration saves nothing,
+    so the earlier messages stay.
     """
-    if not gen.text or gen.mode == "regenerate":
+    if not gen.text or gen.mode != "message":
         return
     try:
         await stub.SaveConversation(
