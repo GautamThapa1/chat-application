@@ -15,6 +15,8 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+# Before the backend imports: some of them read settings when imported.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 levels above
 
 from backend.generated import chat_pb2_grpc
 from backend.orchestrator import auth, conversations, memories, notes, reminders
@@ -22,8 +24,6 @@ from backend.orchestrator.grpc_session import SessionStub
 from backend.orchestrator.rate_limit import default_limit_retry_after, limiter
 from backend.orchestrator.websocket import websocket_endpoint
 from shared_common.common.log import setup_logging
-
-load_dotenv(Path(__file__).resolve().parents[2] / ".env") # parents move upto 3 levels above
 
 DEFAULT_GRPC_TARGET = "127.0.0.1:50051"
 

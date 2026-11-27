@@ -361,7 +361,6 @@ def test_stream_message_regenerate_replaces_the_target_response(chat_setup):
     ]
 
 
-# backend/service/test_chat_stream.py  (Review Focus 3)
 def test_stop_before_saving_keeps_the_old_answer(chat_setup):
     user_id, token, conversation_id, handler_for = chat_setup
     db.save_conversation(user_id, conversation_id, "Question", "Old answer", "seed")

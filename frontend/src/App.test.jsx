@@ -466,7 +466,7 @@ test("internal tool results stay hidden if the assistant response is cancelled o
   });
   await tick(20);
   assert.ok(!page.$(".tool-results"));
-  assert.doesNotMatch(page.threadText(), /task_id.*8|Task added/s);
+  assert.doesNotMatch(page.threadText(), /task_id/);
   assert.match(page.$(".notice.error").textContent, /Tool follow-up failed/);
 });
 
@@ -1326,4 +1326,34 @@ test("only real changes are listed after Stop", () => {
   ]);
 
   assert.deepEqual(changes, ["🗑️ Tasks cleared"]);
+});
+
+test("a failed reply says what had already changed", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page, "add milk");
+  page.socket.serverSend({
+    type: "tool_result", conversation_id: 1, request_id, index: 0, tool: "create_task",
+    result: { task_id: 7, title: "milk", status: "📌 Task added" },
+  });
+  page.socket.serverSend({ type: "error", conversation_id: 1, request_id, error: "Something went wrong." });
+  await tick(20);
+
+  assert.match(
+    page.$(".notice.error").textContent,
+    /Something went wrong\. Done before the error: 📌 Task added: milk\./,
+  );
+});
+
+test("an edit lost with the connection reopens the edit box with the new text", async () => {
+  const page = await boot();
+  await page.open("Chat A");
+  page.click(page.buttons("Edit")[0]);
+  fireEvent.change(page.$(".edit-box textarea"), { target: { value: "reworded" } });
+  page.click(page.$(".edit-box .button.primary"));
+  await reconnect(page);
+  page.socket.serverSend({ type: "active", generations: [] });
+  await tick(20);
+
+  assert.equal(page.$(".edit-box textarea").value, "reworded");
+  assert.match(page.$(".notice").textContent, /Your edit was not saved/);
 });

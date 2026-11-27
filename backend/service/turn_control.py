@@ -20,6 +20,9 @@ class TurnControl:
     conversation_id: int | None = None
     cancelled: threading.Event = field(default_factory=threading.Event)
     deadline: float | None = None  # time.monotonic() value
+    time_context: str = ""  # "today is ..." line added to the system prompt
+    # Delete-all results of this turn, so a repeated call does not ask again.
+    completed_clears: dict = field(default_factory=dict)
 
     def checkpoint(self) -> None:
         """Raise TurnStopped if cancelled, else TurnTimedOut if past the deadline."""

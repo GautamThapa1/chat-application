@@ -798,11 +798,7 @@ export function createChatStore() {
           }
           setNotice(chat, stopNotice(changes, false));
         }
-        const loading = finishGeneration(conversationId);
-        // A stopped edit changed nothing: offer the new text again.
-        if (msg.type === "cancelled" && gen?.mode === "edit") {
-          void loading.then(() => reopenRejectedEdit(chat, gen));
-        }
+        finishGeneration(conversationId);
         break;
       }
 
@@ -853,9 +849,8 @@ export function createChatStore() {
     const chat = chatState(conversationId);
     if (chat.generation) chat.generation.finishing = true;
     if (chat.notice === WAIT_FOR_REPLY) setNotice(chat, "");
-    const loading = loadMessages(conversationId);
+    void loadMessages(conversationId);
     emit();
-    return loading;
   }
 
   // Put text that never reached the database back where the user can resend it,
@@ -871,7 +866,9 @@ export function createChatStore() {
     const chat = chatState(conversationId);
     const gen = chat.generation;
     chat.generation = null;
-    setNotice(chat, error || "Something went wrong.", true);
+    const changes = gen ? describeChanges(chat.toolResults) : [];
+    const done = changes.length ? ` Done before the error: ${changes.join("; ")}.` : "";
+    setNotice(chat, `${error || "Something went wrong."}${done}`, true);
     // A normal message is only saved when the reply succeeds. Give the text
     // back so the user can resend it with one click.
     if (gen?.mode === "message") returnPrompt(conversationId, gen.prompt);
@@ -885,10 +882,11 @@ export function createChatStore() {
   // The server refused an edit: offer the new text again instead of losing it.
   function reopenRejectedEdit(chat, gen) {
     const message = chat.messages.find((m) => m.message_id === gen.editMessageId);
-    if (!message || message.content === gen.prompt || chat.generation) return;
+    if (!message || message.content === gen.prompt || chat.generation) return false;
     chat.editingId = message.message_id;
     chat.editDraft = gen.prompt;
     emit();
+    return true;
   }
 
   // ---------- Loading data ----------
@@ -931,6 +929,10 @@ export function createChatStore() {
         setNotice(chat, finished.stopped
           ? stopNotice(finished.changes, true)
           : "Your message was not saved. It is back in the box.");
+      }
+      // An edit that did not finish changed nothing: offer the new text again.
+      if (finished?.mode === "edit" && reopenRejectedEdit(chat, finished) && !finished.stopped) {
+        setNotice(chat, "Your edit was not saved.");
       }
     } else {
       chat.loadError = result

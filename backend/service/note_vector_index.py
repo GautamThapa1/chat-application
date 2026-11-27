@@ -1,11 +1,14 @@
 """Shared Qdrant storage and retrieval for note, memory, and conversation vectors."""
 
 import hashlib
+import logging
 import os
 import threading
 
 from qdrant_client import QdrantClient, models
 
+
+logger = logging.getLogger(__name__)
 
 _client: QdrantClient | None = None
 _client_config: tuple[str, str | None] | None = None
@@ -118,37 +121,46 @@ def search(
     # Apply the owner filter inside Qdrant so a user never retrieves another
     # user's vector results.
     name = collection_name(model, len(vector), entity)
-    client = _client_for_config()
-    if not client.collection_exists(name):
+    # Search falls back to keywords when the vector store cannot answer.
+    try:
+        client = _client_for_config()
+        if not client.collection_exists(name):
+            return []
+        results = client.query_points(
+            collection_name=name,
+            query=vector,
+            query_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="user_id",
+                        match=models.MatchValue(value=user_id),
+                    ),
+                    models.FieldCondition(
+                        key="model",
+                        match=models.MatchValue(value=model),
+                    ),
+                ]
+            ),
+            limit=limit,
+            with_payload=False,
+        )
+    except Exception:
+        logger.warning("Vector search failed; using keyword matches.", exc_info=True)
         return []
-    results = client.query_points(
-        collection_name=name,
-        query=vector,
-        query_filter=models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="user_id",
-                    match=models.MatchValue(value=user_id),
-                ),
-                models.FieldCondition(
-                    key="model",
-                    match=models.MatchValue(value=model),
-                ),
-            ]
-        ),
-        limit=limit,
-        with_payload=False,
-    )
     return [(point.id, point.score) for point in results.points]
 
 
 def delete_points(collection: str, point_ids: list[int | str]) -> None:
+    """Best effort: a leftover point is harmless, SQLite filters every result."""
     if not point_ids:
         return
-    client = _client_for_config()
-    if client.collection_exists(collection):
-        client.delete(
-            collection_name=collection,
-            points_selector=models.PointIdsList(points=point_ids),
-            wait=True,
-        )
+    try:
+        client = _client_for_config()
+        if client.collection_exists(collection):
+            client.delete(
+                collection_name=collection,
+                points_selector=models.PointIdsList(points=point_ids),
+                wait=True,
+            )
+    except Exception:
+        logger.warning("Could not delete vectors from %s.", collection, exc_info=True)

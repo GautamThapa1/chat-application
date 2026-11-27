@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from backend.service import db_backup
-from backend.service.chat_service import create_server
+from backend.service import db, db_backup
+from backend.service.chat_service import TURN_TIMEOUT_SECONDS, create_server
 from backend.service.db import init_db
 from backend.service.embedding_worker import EmbeddingWorker
 from backend.service.task_reminder_worker import TaskReminderWorker
@@ -28,13 +28,23 @@ def build_http_options() -> types.HttpOptions:
         max_delay=5,
         http_status_codes=[503],
     )
+    # Without this header the SDK asks the server to end every request after
+    # the network timeout, which would cut off long replies.
     return types.HttpOptions(
-        timeout=REQUEST_TIMEOUT_MS, retry_options=retry_options
+        timeout=REQUEST_TIMEOUT_MS,
+        retry_options=retry_options,
+        headers={"X-Server-Timeout": str(TURN_TIMEOUT_SECONDS)},
     )
 
 
-def main() -> None:
+def apply_env_settings() -> None:
+    """Load .env, including settings that modules read when imported."""
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    db.DB_PATH = os.getenv("DB_PATH", db.DB_PATH)
+
+
+def main() -> None:
+    apply_env_settings()
     from shared_common.common.log import setup_logging
 
     setup_logging("chat-service")

@@ -1269,6 +1269,7 @@ def test_relative_date_without_time_defaults_to_nine_am(owners_db):
         .replace("+00:00", "Z")
     )
 
+
 def test_failed_idempotent_write_leaves_nothing(owners_db, monkeypatch):
     user_a, _ = owners_db
     real = db._schedule_task_reminder

@@ -57,14 +57,43 @@ def _pending_tool_messages(messages: list[Any]) -> list[ToolMessage]:
     ]
 
 
-def _content_from_stream(stream: Any, writer) -> tuple[types.Content, list[Any], str]:
+def _incomplete_note(finish_reason: Any) -> str:
+    """A visible note for a reply the model did not finish, else ""."""
+    if finish_reason in (
+        None,
+        types.FinishReason.STOP,
+        types.FinishReason.FINISH_REASON_UNSPECIFIED,
+    ):
+        return ""
+    if finish_reason == types.FinishReason.MAX_TOKENS:
+        return "[This reply was cut off at the length limit.]"
+    return "[This reply was stopped early and may be incomplete.]"
+
+
+def _finish_reason(response: Any) -> Any:
+    candidates = response.candidates or []
+    return getattr(candidates[0], "finish_reason", None) if candidates else None
+
+
+def _with_time(config: types.GenerateContentConfig, time_context: str):
+    if not time_context:
+        return config
+    instruction = f"{config.system_instruction}\n{time_context}"
+    return config.model_copy(update={"system_instruction": instruction})
+
+
+def _content_from_stream(
+    stream: Any, writer
+) -> tuple[types.Content, list[Any], str, Any]:
     """Returns everything Gemini sends in streamed response's content part"""
     parts: list[Any] = []
     function_calls: list[Any] = []
     text_chunks: list[str] = []
+    finish_reason = None
 
     with closing(stream):
         for chunk in stream:
+            finish_reason = _finish_reason(chunk) or finish_reason
             candidates = chunk.candidates or []
             if not candidates or candidates[0].content is None:
                 continue
@@ -76,7 +105,8 @@ def _content_from_stream(stream: Any, writer) -> tuple[types.Content, list[Any],
                     text_chunks.append(part.text)
                     writer({"kind": "chunk", "text": part.text})
 
-    return types.Content(role="model", parts=parts), function_calls, "".join(text_chunks)
+    content = types.Content(role="model", parts=parts)
+    return content, function_calls, "".join(text_chunks), finish_reason
 
 
 def gemini_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
@@ -94,7 +124,8 @@ def gemini_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     app_context = configurable.get("app_context")
     if not isinstance(app_context, dict):
         raise RuntimeError("Missing application context for the Gemini graph.")
-    app_context["control"].checkpoint()  # no new model call after Stop
+    control = app_context["control"]
+    control.checkpoint()  # no new model call after Stop
 
     gemini_client = app_context["gemini_client"]
     model = app_context["model"]
@@ -102,6 +133,7 @@ def gemini_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     messages = list(state.get("messages", []))
     contents = list(state.get("contents", []))
     round_index = state.get("round_index", 0)
+    emitted_text = state.get("emitted_text", False)
 
 
     pending_tools = _pending_tool_messages(messages)
@@ -112,10 +144,18 @@ def gemini_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         stream = gemini_client.models.generate_content_stream(
             model=model,
             contents=contents,
-            config=TOOL_CONFIG,
+            config=_with_time(TOOL_CONFIG, control.time_context),
         )
-        content, calls, streamed_text = _content_from_stream(stream, writer)
+        content, calls, streamed_text, finish_reason = _content_from_stream(
+            stream, writer
+        )
+        emitted_text = bool(streamed_text)
         if not calls: # if it doesn't request a tool
+            note = _incomplete_note(finish_reason)
+            if note:
+                note = f"\n\n{note}" if streamed_text else note
+                writer({"kind": "chunk", "text": note})
+                streamed_text += note
             return {
                 "messages": [AIMessage(content=streamed_text)],
                 "contents": contents,
@@ -138,12 +178,17 @@ def gemini_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         response = gemini_client.models.generate_content(
             model=model,
             contents=contents,
-            config=generation_config,
+            config=_with_time(generation_config, control.time_context),
         )
         content, calls = existing_tools._response_content_and_calls(response)
 
         if not calls:
             final_text = existing_tools._final_text(response, confirmation_prompt)
+            note = _incomplete_note(_finish_reason(response))
+            if note:
+                final_text = f"{final_text}\n\n{note}"
+            if emitted_text:
+                final_text = f"\n\n{final_text}"
             writer({"kind": "final", "text": final_text})
             return {
                 "messages": [AIMessage(content=final_text)],
@@ -155,6 +200,14 @@ def gemini_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
             raise ValueError("Gemini attempted another tool call during a confirmation response.")
         if content is None:
             raise ValueError("Gemini returned tool calls without response content.")
+        # Text sent alongside a later tool call is part of the reply too.
+        text = "".join(
+            part.text for part in content.parts or []
+            if part.text and not part.thought
+        )
+        if text:
+            writer({"kind": "chunk", "text": f"\n\n{text}" if emitted_text else text})
+            emitted_text = True
 
     if len(calls) > MAX_TOOL_CALLS_PER_ROUND:
         raise ValueError("Gemini requested too many tools at once.")
@@ -172,6 +225,7 @@ def gemini_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         "messages": [ai_message],
         "contents": contents,
         "round_index": round_index + 1,
+        "emitted_text": emitted_text,
     }
 
 

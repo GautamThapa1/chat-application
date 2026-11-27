@@ -6,6 +6,7 @@ import threading
 import uuid
 
 from google import genai
+from google.genai import types
 
 from backend.conversation_chunks import chunk_conversation
 from backend.embeddings import (
@@ -52,7 +53,8 @@ class EmbeddingWorker:
 
     def _run(self, api_key: str) -> None:
         try:
-            with genai.Client(api_key=api_key) as client:
+            options = types.HttpOptions(timeout=60_000)  # milliseconds
+            with genai.Client(api_key=api_key, http_options=options) as client:
                 self._process_jobs(client)
         except Exception:
             logger.exception("Embedding worker stopped unexpectedly.")

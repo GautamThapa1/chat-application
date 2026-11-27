@@ -60,6 +60,7 @@ def run_turn(
             "contents": initial_contents,
             "messages": [],
             "round_index": 0,
+            "emitted_text": False,
             "request_id": request_id,
         },
         config=graph_config,

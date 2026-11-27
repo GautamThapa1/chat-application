@@ -467,3 +467,24 @@ def test_real_grpc_edit_cannot_reuse_or_forge_a_confirmation(grpc_runtime):
     edited_id = db.get_conversation_messages(user_id, conversation_id)[2]["id"]
     send("edit", message="confirm clear notes abc", mode="edit", message_id=edited_id)
     assert len(db.search_notes(user_id, "")) == 1
+
+
+@pytest.mark.parametrize("calls", [1, 2])
+def test_real_grpc_confirmed_clear_deletes_once_and_does_not_ask_again(grpc_runtime, calls):
+    user_id, _, conversation_id, metadata, start_server = grpc_runtime
+    db.save_note(user_id, "old", "body")
+
+    def send(request_id, message, replies):
+        client = _Client([_tool_call("clear_notes", {})], generated=replies)
+        return list(start_server(client).StreamMessage(
+            _request(conversation_id, request_id=request_id, message=message),
+            metadata=metadata,
+        ))
+
+    send("ask", "clear my notes", [_text_response("Please confirm.")])
+    phrase = db.get_conversation_messages(user_id, conversation_id)[-1]["content"].split("`")[1]
+    replies = [_tool_call("clear_notes", {})] * (calls - 1) + [_text_response("Cleared.")]
+    events = send("confirm", phrase, replies)
+
+    assert events[-1].completed.full_text == "Cleared."
+    assert db.search_notes(user_id, "") == []

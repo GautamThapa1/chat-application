@@ -566,3 +566,28 @@ async def test_concurrent_generations_have_independent_trace_ids():
 async def test_cancelled_edit_saves_nothing():
     stub = endless_stream(started(), chunk("partial", 0))
     assert await stop_reply(stub, LiveWebSocket(), mode="edit", message_id=11) == []
+
+
+@pytest.mark.asyncio
+async def test_chunk_offsets_count_utf16_units_like_the_browser():
+    stub = FakeStub(lambda request: events(
+        started(), chunk("Hi 🎉", 0), chunk(" there", 4), completed("Hi 🎉 there!"),
+    ))
+    websocket = LiveWebSocket()
+    task = start_endpoint(websocket, stub)
+    websocket.push(json.loads(create_message("Hello")))
+    offsets = [(await websocket.next_event("chunk"))["offset"] for _ in range(3)]
+    websocket.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert offsets == [0, 5, 11]
+
+
+@pytest.mark.asyncio
+async def test_blank_message_is_rejected():
+    stub = FakeStub()
+    websocket = FakeWebSocket([create_message("   ")])
+    await websocket_module.websocket_endpoint(websocket, stub, user_id=1)
+
+    assert websocket.sent_messages[0]["error"] == "Invalid message payload."
+    stub.StreamMessage.assert_not_called()

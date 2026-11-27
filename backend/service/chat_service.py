@@ -7,9 +7,12 @@ import threading
 import time
 from concurrent import futures
 from contextlib import closing
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import grpc
 
+from backend.embeddings import QUERY_TASK_TYPE, embed_text, embedding_model
 from backend.generated import chat_pb2, chat_pb2_grpc
 from backend.service import db, memory_store
 from backend.service.gemini import runner as gemini_chat
@@ -26,6 +29,21 @@ class _ConversationMessageNotFound(LookupError):
 _CHAT_STREAM_ERROR_MESSAGE = "Something went wrong. Please try again."
 # Checked before each model and tool call, so a turn can overrun by one call.
 TURN_TIMEOUT_SECONDS = 180
+
+
+def _time_context(user_id: int) -> str:
+    """Tell the model today's date, so relative dates are not guessed."""
+    zone = db.get_user_timezone(user_id)
+    now = datetime.now(ZoneInfo(zone))
+    return (
+        f"The current date and time for this user is {now:%A, %Y-%m-%d %H:%M} "
+        f"({zone}). Work out relative dates from it, and ask if a date is ambiguous."
+    )
+
+
+def _require_text(context, *values: str) -> None:
+    if not all(value.strip() for value in values):
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Text cannot be blank.")
 
 
 def _load_history_for_mode(
@@ -175,6 +193,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                     conversation_id=request.conversation_id,
                     cancelled=cancelled,
                     deadline=time.monotonic() + TURN_TIMEOUT_SECONDS,
+                    time_context=_time_context(user_id),
                 ),
             )
             with closing(turn):
@@ -309,6 +328,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
 
     def SaveConversation(self, request, context):
+        _require_text(context, request.user_content, request.assistant_content)
         try:
             db.save_conversation(
                 current_user_id(),
@@ -387,12 +407,33 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         user_id = current_user_id()
         try:
             limit = request.limit or 20
-            if request.embedding and request.embedding_model:
+            embedding = list(request.embedding)
+            model = request.embedding_model
+            # The web app has no Gemini key, so the query is embedded here.
+            if (
+                not embedding
+                and self._gemini_client is not None
+                and request.keyword.strip()
+            ):
+                model = embedding_model()
+                try:
+                    embedding = embed_text(
+                        self._gemini_client,
+                        request.keyword,
+                        task_type=QUERY_TASK_TYPE,
+                        model=model,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Conversation query embedding failed; using keyword search.",
+                        exc_info=True,
+                    )
+            if embedding and model:
                 rows = db.search_conversations_hybrid(
                     user_id,
                     request.keyword,
-                    list(request.embedding),
-                    request.embedding_model,
+                    embedding,
+                    model,
                     limit=limit,
                 )
             else:
@@ -473,6 +514,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
     # Notes  (db.save_note / db.search_notes)
     # ---------------------------------------------------------------- #
     def SaveNote(self, request, context):
+        _require_text(context, request.title, request.content)
         try:
             result = db.save_note_idempotent(
                 current_user_id(),
@@ -496,6 +538,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
 
     def UpdateNote(self, request, context):
+        _require_text(context, request.title, request.content)
         user_id = current_user_id()
         try:
             result = db.update_note_idempotent(
@@ -597,6 +640,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
     # Memories
     # ---------------------------------------------------------------- #
     def SaveMemory(self, request, context):
+        _require_text(context, request.title, request.content)
         try:
             result = memory_store.save_memory_idempotent(
                 current_user_id(),
@@ -620,6 +664,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
 
     def UpdateMemory(self, request, context):
+        _require_text(context, request.title, request.content)
         try:
             result = memory_store.update_memory_idempotent(
                 current_user_id(),
@@ -734,6 +779,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
     # Tasks  (db.create_task / db.get_tasks / db.complete_task)
     # ---------------------------------------------------------------- #
     def CreateTask(self, request, context):
+        _require_text(context, request.title)
         try:
             result = db.create_task_idempotent(
                 current_user_id(),

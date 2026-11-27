@@ -119,20 +119,60 @@ def _migrate_plaintext_database(path: str, key: str) -> None:
                 pass
 
 
+# SQLCipher spends about 100 ms turning the passphrase into a key on every
+# open. The result depends only on the passphrase and the file's salt, so derive
+# it once and open with the raw key afterwards (SQLCipher 4 default settings).
+_KDF_ITERATIONS = 256_000
+_raw_keys: dict[tuple[str, bytes], str] = {}
+
+
+def _raw_database_key(passphrase: str, path: str) -> str | None:
+    try:
+        with open(path, "rb") as database_file:
+            salt = database_file.read(16)
+    except OSError:
+        return None
+    if len(salt) < 16:
+        return None
+    cache_key = (hashlib.sha256(passphrase.encode()).hexdigest(), salt)
+    if cache_key not in _raw_keys:
+        derived = hashlib.pbkdf2_hmac(
+            "sha512", passphrase.encode(), salt, _KDF_ITERATIONS, 32
+        )
+        _raw_keys[cache_key] = f"x'{derived.hex()}{salt.hex()}'"
+    return _raw_keys[cache_key]
+
+
+def _open_with_key(key: str):
+    conn = sqlcipher3.connect(DB_PATH)
+    try:
+        _apply_database_key(conn, key)
+    except sqlcipher3.DatabaseError:
+        conn.close()
+        raise
+    return conn
+
+
 def get_connection():
     key = _database_key()
     if _is_plaintext_database(DB_PATH):
         _migrate_plaintext_database(DB_PATH, key)
 
-    conn = sqlcipher3.connect(DB_PATH)
-    try:
-        _apply_database_key(conn, key)
-    except sqlcipher3.DatabaseError as exc:
-        conn.close()
-        raise RuntimeError(
-            "Could not open the database with DATABASE_KEY; check the key "
-            "or database integrity."
-        ) from exc
+    conn = None
+    raw_key = _raw_database_key(key, DB_PATH)
+    if raw_key is not None:
+        try:
+            conn = _open_with_key(raw_key)
+        except sqlcipher3.DatabaseError:
+            pass  # not a default-format database: let SQLCipher derive the key
+    if conn is None:
+        try:
+            conn = _open_with_key(key)
+        except sqlcipher3.DatabaseError as exc:
+            raise RuntimeError(
+                "Could not open the database with DATABASE_KEY; check the key "
+                "or database integrity."
+            ) from exc
 
     conn.row_factory = sqlcipher3.Row
     conn.execute("PRAGMA foreign_keys = ON") # don't allow invalid user and CASCADE on delete functionality
@@ -227,12 +267,12 @@ def _delete_conversation_embedding_index(conn, conversation_id: int) -> None:
     by_collection: dict[str, list[str]] = {}
     for row in rows:
         by_collection.setdefault(row["collection"], []).append(row["chunk_id"])
-    for collection, chunk_ids in by_collection.items():
-        note_vector_index.delete_points(collection, chunk_ids)
     conn.execute(
         "DELETE FROM conversation_embedding_index WHERE conversation_id = ?",
         (conversation_id,),
     )
+    for collection, chunk_ids in by_collection.items():
+        note_vector_index.delete_points(collection, chunk_ids)
 
 
 def _reconcile_conversation_embedding_jobs(conn) -> None:
@@ -566,6 +606,7 @@ def init_db():
             from backend.service.memory_store import init_memory_storage
 
             init_memory_storage(conn)
+            _purge_expired(conn)
             _reconcile_note_embedding_jobs(conn)
             _reconcile_conversation_embedding_jobs(conn)
     finally:
@@ -708,8 +749,8 @@ def edit_conversation_message(
                   WHERE conversation_id = ? AND user_id = ?""",
                 (conversation_id, user_id),
             )
-            _delete_conversation_embedding_index(conn, conversation_id)
             _queue_conversation_embedding(conn, user_id, conversation_id)
+            _delete_conversation_embedding_index(conn, conversation_id)
             return True, content
     finally:
         conn.close()
@@ -846,8 +887,8 @@ def replace_edited_turn(
                   WHERE conversation_id = ? AND user_id = ?""",
                 (conversation_id, user_id),
             )
-            _delete_conversation_embedding_index(conn, conversation_id)
             _queue_conversation_embedding(conn, user_id, conversation_id)
+            _delete_conversation_embedding_index(conn, conversation_id)
             return True
     finally:
         conn.close()
@@ -909,8 +950,8 @@ def replace_assistant_response(
                   WHERE conversation_id = ? AND user_id = ?""",
                 (conversation_id, user_id),
             )
-            _delete_conversation_embedding_index(conn, conversation_id)
             _queue_conversation_embedding(conn, user_id, conversation_id)
+            _delete_conversation_embedding_index(conn, conversation_id)
             return True
     finally:
         conn.close()
@@ -1045,6 +1086,47 @@ class IdempotencyInProgress(TimeoutError):
 def _payload_hash(payload: dict) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 3600
+NOTE_WRITES = ("save_note", "update_note")
+TASK_WRITES = ("create_task", "update_task")
+
+
+def _purge_expired(conn) -> None:
+    """Drop expired sessions and confirmations, and retry records too old to use."""
+    now = int(time.time())
+    conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    conn.execute("DELETE FROM pending_confirmations WHERE expires_at <= ?", (now,))
+    conn.execute(
+        "DELETE FROM api_idempotency WHERE updated_at < ?",
+        (now - IDEMPOTENCY_TTL_SECONDS,),
+    )
+
+
+def _forget_stored_text(
+    conn, user_id: int, operations: tuple[str, ...], entity_id: int | None = None
+) -> None:
+    """Blank the text that stored retry responses copied from deleted items."""
+    placeholders = ",".join("?" for _ in operations)
+    rows = conn.execute(
+        f"""SELECT idempotency_key, response_json FROM api_idempotency
+             WHERE user_id = ? AND operation IN ({placeholders})
+               AND response_json IS NOT NULL""",
+        (user_id, *operations),
+    ).fetchall()
+    for row in rows:
+        stored = json.loads(row["response_json"])
+        if entity_id is not None and stored.get("id") != entity_id:
+            continue
+        for field in ("title", "content"):
+            if field in stored:
+                stored[field] = ""
+        conn.execute(
+            """UPDATE api_idempotency SET response_json = ?
+                WHERE user_id = ? AND idempotency_key = ?""",
+            (json.dumps(stored, sort_keys=True), user_id, row["idempotency_key"]),
+        )
 
 
 def run_idempotent_request(
@@ -1229,8 +1311,6 @@ def update_note(user_id: int, note_id: int, title: str, content: str) -> bool:
             ).fetchone()
             if note is None:
                 return False
-            if indexed is not None:
-                note_vector_index.delete_points(indexed["collection"], [note_id])
             updated = conn.execute(
                 "UPDATE notes SET title = ?, content = ? WHERE id = ? AND user_id = ?",
                 (title, content, note_id, user_id),
@@ -1241,6 +1321,8 @@ def update_note(user_id: int, note_id: int, title: str, content: str) -> bool:
                 "DELETE FROM note_embedding_index WHERE note_id = ?", (note_id,)
             )
             _queue_note_embedding(conn, note_id, user_id, title, content)
+            if indexed is not None:
+                note_vector_index.delete_points(indexed["collection"], [note_id])
             return True
     finally:
         conn.close()
@@ -1982,9 +2064,10 @@ def clear_notes(user_id: int) -> int:
             by_collection: dict[str, list[int]] = {}
             for row in indexed_rows:
                 by_collection.setdefault(row["collection"], []).append(row["note_id"])
+            cur = conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+            _forget_stored_text(conn, user_id, NOTE_WRITES)
             for collection, note_ids in by_collection.items():
                 note_vector_index.delete_points(collection, note_ids)
-            cur = conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
             return cur.rowcount
     finally:
         conn.close()
@@ -2008,8 +2091,6 @@ def delete_note(user_id: int, note_id: int) -> bool:
                      WHERE note_id = ? AND user_id = ?""",
                 (note_id, user_id),
             ).fetchone()
-            if indexed is not None:
-                note_vector_index.delete_points(indexed["collection"], [note_id])
             if _table_exists(conn, "note_embeddings_legacy"):
                 conn.execute(
                     "DELETE FROM note_embeddings_legacy WHERE note_id = ?",
@@ -2019,6 +2100,9 @@ def delete_note(user_id: int, note_id: int) -> bool:
                 "DELETE FROM notes WHERE id = ? AND user_id = ?",
                 (note_id, user_id),
             )
+            _forget_stored_text(conn, user_id, NOTE_WRITES, note_id)
+            if indexed is not None:
+                note_vector_index.delete_points(indexed["collection"], [note_id])
             return deleted.rowcount > 0
     finally:
         conn.close()
@@ -2091,6 +2175,7 @@ def clear_notes_in_transaction(conn, user_id: int) -> dict:
     for row in indexed_rows:
         by_collection.setdefault(row["collection"], []).append(row["note_id"])
     cur = conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+    _forget_stored_text(conn, user_id, NOTE_WRITES)
     for collection, note_ids in by_collection.items():
         note_vector_index.delete_points(collection, note_ids)
     return {"deleted_count": cur.rowcount}
@@ -2261,6 +2346,17 @@ def _schedule_task_reminder(
                sent_at = NULL""",
         (task_id, user_id, scheduled_at, status),
     )
+
+
+def get_user_timezone(user_id: int) -> str:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT timezone FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        return (row["timezone"] if row else None) or "UTC"
+    finally:
+        conn.close()
 
 
 def set_user_timezone(user_id: int, timezone_name: str) -> bool:
@@ -2531,6 +2627,7 @@ def delete_task(user_id: int, task_id: int) -> bool:
                 "DELETE FROM tasks WHERE id = ? AND user_id = ?",
                 (task_id, user_id),
             )
+            _forget_stored_text(conn, user_id, TASK_WRITES, task_id)
             return cur.rowcount > 0
     finally:
         conn.close()
@@ -2548,13 +2645,12 @@ def delete_task_idempotent(
             "DELETE FROM task_reminders WHERE task_id = ? AND user_id = ?",
             (task_id, user_id),
         )
-        return {
-            "success": conn.execute(
-                "DELETE FROM tasks WHERE id = ? AND user_id = ?",
-                (task_id, user_id),
-            ).rowcount
-            > 0
-        }
+        deleted = conn.execute(
+            "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+            (task_id, user_id),
+        ).rowcount
+        _forget_stored_text(conn, user_id, TASK_WRITES, task_id)
+        return {"success": deleted > 0}
 
     return run_idempotent_request(
         user_id,
@@ -2573,9 +2669,11 @@ def clear_tasks(user_id: int) -> int:
             conn.execute(
                 "DELETE FROM task_reminders WHERE user_id = ?", (user_id,)
             )
-            return conn.execute(
+            deleted = conn.execute(
                 "DELETE FROM tasks WHERE user_id = ?", (user_id,)
             ).rowcount
+            _forget_stored_text(conn, user_id, TASK_WRITES)
+            return deleted
     finally:
         conn.close()
 
@@ -2598,11 +2696,11 @@ def clear_tasks_idempotent(
         conn.execute(
             "DELETE FROM task_reminders WHERE user_id = ?", (user_id,)
         )
-        return {
-            "deleted_count": conn.execute(
-                "DELETE FROM tasks WHERE user_id = ?", (user_id,)
-            ).rowcount
-        }
+        deleted = conn.execute(
+            "DELETE FROM tasks WHERE user_id = ?", (user_id,)
+        ).rowcount
+        _forget_stored_text(conn, user_id, TASK_WRITES)
+        return {"deleted_count": deleted}
 
     return run_idempotent_request(
         user_id, idempotency_key, "clear_tasks", {}, execute,
@@ -2942,6 +3040,7 @@ def create_session(user_id: int, ttl_seconds: int = SESSION_TTL_SECONDS) -> str:
     conn = get_connection()
     try:
         with conn:
+            _purge_expired(conn)
             conn.execute(
                 "INSERT INTO sessions (token_hash, user_id, created_at, expires_at)"
                 " VALUES (?, ?, ?, ?)",

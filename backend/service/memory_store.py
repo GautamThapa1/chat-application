@@ -363,31 +363,55 @@ def update_memory_idempotent(
     )
 
 
+def _delete_memory_in_transaction(conn, user_id: int, memory_id: int) -> dict:
+    memory = conn.execute(
+        "SELECT 1 FROM memories WHERE id = ? AND user_id = ?",
+        (memory_id, user_id),
+    ).fetchone()
+    if memory is None:
+        return {"success": False}
+    indexed = conn.execute(
+        """SELECT collection FROM memory_embedding_index
+             WHERE memory_id = ? AND user_id = ?""",
+        (memory_id, user_id),
+    ).fetchone()
+    deleted = conn.execute(
+        "DELETE FROM memories WHERE id = ? AND user_id = ?",
+        (memory_id, user_id),
+    )
+    db._forget_stored_text(
+        conn, user_id, ("save_memory", "update_memory"), memory_id
+    )
+    if indexed is not None:
+        note_vector_index.delete_points(indexed["collection"], [memory_id])
+    return {"success": deleted.rowcount > 0}
+
+
 def delete_memory(user_id: int, memory_id: int) -> bool:
     conn = db.get_connection()
     try:
         with conn:
             conn.execute("BEGIN IMMEDIATE")
-            memory = conn.execute(
-                "SELECT 1 FROM memories WHERE id = ? AND user_id = ?",
-                (memory_id, user_id),
-            ).fetchone()
-            if memory is None:
-                return False
-            indexed = conn.execute(
-                """SELECT collection FROM memory_embedding_index
-                     WHERE memory_id = ? AND user_id = ?""",
-                (memory_id, user_id),
-            ).fetchone()
-            if indexed is not None:
-                note_vector_index.delete_points(indexed["collection"], [memory_id])
-            deleted = conn.execute(
-                "DELETE FROM memories WHERE id = ? AND user_id = ?",
-                (memory_id, user_id),
-            )
-            return deleted.rowcount > 0
+            return _delete_memory_in_transaction(conn, user_id, memory_id)["success"]
     finally:
         conn.close()
+
+
+def delete_memory_idempotent(
+    user_id: int, memory_id: int, idempotency_key: str
+) -> dict:
+    def execute(conn) -> dict:
+        if conn is None:
+            return {"success": delete_memory(user_id, memory_id)}
+        return _delete_memory_in_transaction(conn, user_id, memory_id)
+
+    return db.run_idempotent_request(
+        user_id,
+        idempotency_key,
+        "delete_memory",
+        {"memory_id": memory_id},
+        execute,
+    )
 
 
 def get_pending_memory_embeddings(

@@ -135,12 +135,12 @@ def test_memory_save_and_delete_use_the_memory_store(monkeypatch):
         calls.append(("save", user_id, title, content, idempotency_key))
         return {"id": 12, "title": title, "content": content}
 
-    def delete_memory(user_id, memory_id):
-        calls.append(("delete", user_id, memory_id))
-        return True
+    def delete_memory(user_id, memory_id, idempotency_key):
+        calls.append(("delete", user_id, memory_id, idempotency_key))
+        return {"success": True}
 
     monkeypatch.setattr(memory_store, "save_memory_idempotent", save_memory)
-    monkeypatch.setattr(memory_store, "delete_memory", delete_memory)
+    monkeypatch.setattr(memory_store, "delete_memory_idempotent", delete_memory)
 
     saved = gemini_chat.dispatch_tool_call(
         "save_memory",
@@ -158,6 +158,7 @@ def test_memory_save_and_delete_use_the_memory_store(monkeypatch):
         user_message="Forget that memory",
         history=[],
         confirmation_token="unused",
+        idempotency_key="forget-key",
     )
 
     assert saved.response == {
@@ -169,7 +170,7 @@ def test_memory_save_and_delete_use_the_memory_store(monkeypatch):
     assert deleted.response["success"] is True
     assert calls == [
         ("save", 5, "Style", "Concise replies", "memory-key"),
-        ("delete", 5, 12),
+        ("delete", 5, 12, "forget-key"),
     ]
 
 

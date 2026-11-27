@@ -20,6 +20,9 @@ class AgentState(TypedDict, total=False):
     # Number of Gemini responses that have requested tool execution.
     round_index: int
 
+    # True once reply text has been sent, so later text starts a new paragraph.
+    emitted_text: bool
+
     # Used for diagnostic/stream correlation; never model-controlled.
     request_id: str
 

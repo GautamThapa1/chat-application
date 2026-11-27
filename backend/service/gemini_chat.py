@@ -8,7 +8,7 @@ import secrets
 from collections.abc import Iterator
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -24,6 +24,9 @@ DEFAULT_MAX_INPUT_TOKENS = 24_000
 MAX_INPUT_TOKENS_ENV = "GEMINI_MAX_INPUT_TOKENS"
 MAX_TOOL_ROUNDS = 5
 MAX_TOOL_CALLS_PER_ROUND = 8
+# Limits on what one list or search result may add to the model's context.
+MAX_LIST_ITEMS = 50
+MAX_ITEM_CHARS = 2_000
 
 SYSTEM_INSTRUCTION = """You are a helpful chat assistant.
 Use the provided functions when the user requests note, memory, or task operations.
@@ -548,15 +551,19 @@ def _confirmed_clear(
     """Run a confirmed delete-all once; None if the stored record refuses it."""
     if control is None or not control.can_confirm or control.conversation_id is None:
         return None
+    if clear in control.completed_clears:
+        return control.completed_clears[clear]
     token = user_message.strip().rsplit(" ", 1)[-1]
     try:
-        return clear(
+        result = clear(
             user_id,
             _with_idempotency_key(idempotency_key),
             confirmation=(control.conversation_id, token),
         )
     except db.ConfirmationInvalid:
         return None
+    control.completed_clears[clear] = result
+    return result
 
 
 def _confirmation_request(
@@ -576,6 +583,28 @@ def _confirmation_request(
         {"confirmation_required": True, "message": prompt},
         confirmation_prompt=prompt,
     )
+
+
+def _deadline_fields(due_at_utc: str, timezone_name: str | None) -> dict:
+    """The deadline as the user reads it ("" if there is none)."""
+    if not due_at_utc or "T" not in due_at_utc:
+        return {"due_at_local_display": ""}
+    instant = datetime.fromisoformat(due_at_utc.replace("Z", "+00:00"))
+    local = instant.astimezone(ZoneInfo(timezone_name or "UTC"))
+    return {"due_at_local_display": local.strftime("%b %-d, %Y at %-I:%M %p")}
+
+
+def _past_warning(due_at_utc: str) -> dict:
+    if not due_at_utc or "T" not in due_at_utc:
+        return {}
+    instant = datetime.fromisoformat(due_at_utc.replace("Z", "+00:00"))
+    if instant > datetime.now(timezone.utc):
+        return {}
+    return {"warning": "This deadline is in the past, so no reminder will be sent."}
+
+
+def _shortened(text: str) -> str:
+    return text if len(text) <= MAX_ITEM_CHARS else text[:MAX_ITEM_CHARS] + "…"
 
 
 def dispatch_tool_call(
@@ -662,7 +691,9 @@ def dispatch_tool_call(
         })
 
     if name == "delete_memory":
-        success = memory_store.delete_memory(user_id, args["memory_id"])
+        success = memory_store.delete_memory_idempotent(
+            user_id, args["memory_id"], _with_idempotency_key(idempotency_key)
+        )["success"]
         return ToolExecutionResult({
             "memory_id": args["memory_id"],
             "success": success,
@@ -719,17 +750,25 @@ def dispatch_tool_call(
             rows = db.search_notes(user_id, "")
 
         response_key = "memories" if is_memory else "notes"
-        return ToolExecutionResult({
+        rows = list(rows)
+        omitted = max(0, len(rows) - MAX_LIST_ITEMS)
+        if omitted:
+            # Searches are ranked best first; the note list is oldest first.
+            rows = rows[:MAX_LIST_ITEMS] if search_requested else rows[omitted:]
+        response = {
             response_key: [
                 {
                     "id": row["id"],
                     "title": row["title"],
-                    "content": row["content"],
+                    "content": _shortened(row["content"]),
                     "created_at": row["created_at"],
                 }
                 for row in rows
             ],
-        })
+        }
+        if omitted:
+            response["omitted"] = omitted
+        return ToolExecutionResult(response)
 
     if name == "clear_notes":
         result = None
@@ -752,45 +791,37 @@ def dispatch_tool_call(
             ),
         })
 
-    if name == "create_task":
-        task = db.create_task_idempotent(
-            user_id,
-            args["title"],
-            args["due_at_local"],
-            _with_idempotency_key(idempotency_key),
+    if name in {"create_task", "update_task"}:
+        write, first = (
+            (db.create_task_idempotent, args["title"])
+            if name == "create_task"
+            else (db.update_task_deadline_idempotent, args["task_id"])
         )
-        due_at_utc = task["due_at_utc"] or task["legacy_due_date"]
-        due_at_local_display = ""
-        if task["due_at_utc"]:
-            instant = datetime.fromisoformat(
-                task["due_at_utc"].replace("Z", "+00:00")
+        try:
+            task = write(
+                user_id,
+                first,
+                args["due_at_local"],
+                _with_idempotency_key(idempotency_key),
             )
-            local = instant.astimezone(ZoneInfo(task["timezone"] or "UTC"))
-            due_at_local_display = local.strftime("%b %-d, %Y at %-I:%M %p")
+        except db.IdempotencyConflict:
+            raise
+        except ValueError as exc:  # e.g. a deadline the server cannot read
+            return ToolExecutionResult({"error": str(exc)})
+        if name == "update_task" and not task.get("found"):
+            return ToolExecutionResult({"error": "Task not found."})
+        due_at_utc = task["due_at_utc"] or task.get("legacy_due_date", "")
         return ToolExecutionResult({
             "task_id": task["id"],
             "title": task["title"],
             "due_at_utc": due_at_utc,
-            "due_at_local_display": due_at_local_display,
+            **_deadline_fields(due_at_utc, task["timezone"]),
+            **_past_warning(due_at_utc),
             "timezone": task["timezone"],
-            "status": "📌 Task added",
-        })
-
-    if name == "update_task":
-        result = db.update_task_deadline_idempotent(
-            user_id,
-            args["task_id"],
-            args["due_at_local"],
-            _with_idempotency_key(idempotency_key),
-        )
-        if not result.get("found"):
-            return ToolExecutionResult({"error": "Task not found."})
-        return ToolExecutionResult({
-            "task_id": result["id"],
-            "title": result["title"],
-            "due_at_utc": result["due_at_utc"],
-            "timezone": result["timezone"],
-            "status": "📅 Task deadline updated",
+            "status": (
+                "📌 Task added" if name == "create_task"
+                else "📅 Task deadline updated"
+            ),
         })
 
     if name == "list_tasks":
@@ -801,6 +832,7 @@ def dispatch_tool_call(
                     "id": task["id"],
                     "title": task["title"],
                     "due_at_utc": task["due_at_utc"] or task["legacy_due_date"],
+                    **_deadline_fields(task["due_at_utc"], task["timezone"]),
                     "timezone": task["timezone"],
                     "completed": task["completed"],
                     "status": "✅ Completed" if task["completed"] else "⏳ Pending",

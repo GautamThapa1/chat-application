@@ -234,7 +234,8 @@ async def _run_generation_with_trace(
         })
 
     async def emit_text(text: str) -> None:
-        offset = len(gen.text)
+        # The browser slices strings in UTF-16 units, where an emoji counts as 2.
+        offset = len(gen.text.encode("utf-16-le", "surrogatepass")) // 2
         gen.chunks.append(text)
         await emit("chunk", content=text, offset=offset)
 
@@ -403,6 +404,7 @@ async def websocket_endpoint(
                 or not isinstance(request_id, str)
                 or bad_id(conversation_id)
                 or mode not in {"message", "edit", "regenerate"}
+                or (mode != "regenerate" and not message.strip())
                 or (mode == "edit" and bad_id(message_id))
                 or (mode == "regenerate" and bad_id(assistant_message_id))
             ):
