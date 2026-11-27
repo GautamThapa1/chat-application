@@ -13,7 +13,7 @@ from backend.generated import chat_pb2, chat_pb2_grpc
 from backend.service import db, memory_store
 from backend.service.gemini import runner as gemini_chat
 from backend.service.auth_interceptor import AuthInterceptor, current_user_id
-from backend.service.turn_control import TurnControl
+from backend.service.turn_control import TurnControl, TurnStopped
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,10 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                     else:
                         raise ValueError(f"Unknown Gemini turn event: {kind!r}.")
 
+            # Stop may arrive while the last read is still blocked.
+            if cancelled.is_set():
+                raise GeneratorExit
+
             full_text = "".join(chunks)
             if not full_text:
                 raise ValueError("Gemini returned an empty response.")
@@ -237,7 +241,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                 request_id=request.request_id,
                 completed=chat_pb2.Completed(full_text=full_text),
             )
-        except GeneratorExit:
+        except (GeneratorExit, TurnStopped) as stop:
             partial = "".join(chunks)
             if partial and mode != "regenerate":
                 try:
@@ -250,6 +254,8 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                     )
                 except Exception:
                     logging.exception("Could not save the partial response")
+            if isinstance(stop, TurnStopped):
+                raise GeneratorExit from None
             raise
         except Exception:
             logging.exception("StreamMessage failed")

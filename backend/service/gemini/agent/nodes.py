@@ -94,6 +94,7 @@ def gemini_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     app_context = configurable.get("app_context")
     if not isinstance(app_context, dict):
         raise RuntimeError("Missing application context for the Gemini graph.")
+    app_context["control"].checkpoint()  # no new model call after Stop
 
     gemini_client = app_context["gemini_client"]
     model = app_context["model"]

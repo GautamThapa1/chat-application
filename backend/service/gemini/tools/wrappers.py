@@ -52,6 +52,7 @@ def make_dispatch_tool(tool_name: str) -> StructuredTool:
                 + ", ".join(sorted(missing))
             )
 
+        app_context["control"].checkpoint()  # no new tool after Stop
         result = existing_tools.dispatch_tool_call(
             tool_name,
             arguments,

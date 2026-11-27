@@ -358,3 +358,23 @@ def test_stream_message_regenerate_replaces_the_target_response(chat_setup):
         ("user", "First question"),
         ("assistant", "Regenerated answer"),
     ]
+
+
+# backend/service/test_chat_stream.py  (Review Focus 3)
+def test_stop_before_saving_keeps_the_old_answer(chat_setup):
+    user_id, token, conversation_id, handler_for = chat_setup
+    db.save_conversation(user_id, conversation_id, "Question", "Old answer", "seed")
+    assistant_id = db.get_conversation_messages(user_id, conversation_id)[-1]["id"]
+    context = _Context(token)
+    events = handler_for(_GeminiClient([_chunk("New answer")])).unary_stream(
+        _request(conversation_id, request_id="regen", mode="regenerate",
+                 assistant_message_id=assistant_id),
+        context,
+    )
+
+    assert next(events).WhichOneof("payload") == "started"
+    assert next(events).chunk.content == "New answer"
+    context.cancel()
+    with pytest.raises(GeneratorExit):
+        next(events)
+    assert db.get_conversation_messages(user_id, conversation_id)[-1]["content"] == "Old answer"
