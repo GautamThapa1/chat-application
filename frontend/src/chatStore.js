@@ -92,6 +92,35 @@ export function isVisibleMemoryResult(item) {
     && item.result.memory_id > 0;
 }
 
+// Tools that change stored data (WRITE_TOOLS in backend/service/gemini_chat.py).
+const WRITE_TOOLS = new Set([
+  "save_note", "save_memory", "update_note", "update_memory", "delete_memory",
+  "clear_notes", "create_task", "update_task", "complete_task", "delete_task",
+  "clear_tasks",
+]);
+
+/** One short line for each reported tool result that changed something. */
+export function describeChanges(toolResults) {
+  return toolResults
+    .filter((item) => item && WRITE_TOOLS.has(item.tool))
+    .map((item) => item.result)
+    .filter((result) => result?.status && !result.error && result.success !== false
+      && result.deleted_count !== 0)
+    .map((result) => (result.title ? `${result.status}: ${result.title}` : result.status));
+}
+
+/** The line shown after Stop. `returned`: the message went back into the box. */
+export function stopNotice(changes, returned) {
+  const parts = [STOPPED];
+  if (returned) parts.push("Your message is back in the box.");
+  if (changes.length) {
+    parts.push(`Done before stopping: ${changes.join("; ")}. Other changes may also have completed.`);
+  } else if (returned) {
+    parts.push("Some changes may already have been made.");
+  }
+  return parts.join(" ");
+}
+
 function decodeBase64Url(value) {
   const padding = "=".repeat((4 - value.length % 4) % 4);
   const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
@@ -761,7 +790,14 @@ export function createChatStore() {
       case "complete":
       case "cancelled": {
         if (gen !== null && !isCurrent) break; // an old reply's event: ignore
-        if (msg.type === "cancelled") setNotice(chat, STOPPED);
+        if (msg.type === "cancelled") {
+          const changes = describeChanges(chat.toolResults);
+          if (gen) {
+            gen.stopped = true;
+            gen.changes = changes;
+          }
+          setNotice(chat, stopNotice(changes, false));
+        }
         const loading = finishGeneration(conversationId);
         // A stopped edit changed nothing: offer the new text again.
         if (msg.type === "cancelled" && gen?.mode === "edit") {
@@ -892,8 +928,8 @@ export function createChatStore() {
         && m.message_id > finished.afterId;
       if (finished?.mode === "message" && !chat.messages.some(saved)) {
         returnPrompt(conversationId, finished.prompt);
-        setNotice(chat, chat.notice === STOPPED
-          ? "Stopped. Your message is back in the box."
+        setNotice(chat, finished.stopped
+          ? stopNotice(finished.changes, true)
           : "Your message was not saved. It is back in the box.");
       }
     } else {

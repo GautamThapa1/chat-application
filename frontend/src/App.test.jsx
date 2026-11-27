@@ -9,7 +9,7 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, test, vi } from "vitest";
 import assert from "node:assert/strict";
 import App from "./App.jsx";
-import { createChatStore } from "./chatStore.js";
+import { createChatStore, describeChanges } from "./chatStore.js";
 import { StoreContext } from "./StoreContext.js";
 
 const stores = [];
@@ -444,8 +444,9 @@ test("internal tool results stay hidden if the assistant response is cancelled o
   page.socket.serverSend({ type: "cancelled", conversation_id: 1, request_id });
   await tick(20);
   assert.ok(!page.$(".tool-results"));
-  assert.doesNotMatch(page.threadText(), /Task added/);
-  assert.match(page.$(".notice").textContent, /Stopped/);
+  // No raw result; only the notice says what changed before Stop.
+  assert.doesNotMatch(page.threadText(), /task_id/);
+  assert.match(page.$(".notice").textContent, /Stopped\..*Done before stopping: 📌 Task added\./);
 
   await page.send("create another task");
   request_id = page.socket.sentOfType("message").at(-1).request_id;
@@ -1295,4 +1296,34 @@ test("a stopped edit reopens the edit box with the new text", async () => {
   await tick(20);
 
   assert.equal(page.$(".edit-box textarea").value, "reworded");
+});
+
+test("stopping after a change says what was done", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page, "add milk");
+  page.socket.serverSend({
+    type: "tool_result", conversation_id: 1, request_id, index: 0, tool: "create_task",
+    result: { task_id: 7, title: "milk", status: "📌 Task added" },
+  });
+  page.socket.serverSend({ type: "cancelled", conversation_id: 1, request_id });
+  await tick(20);
+
+  assert.match(
+    page.$(".notice").textContent,
+    /Done before stopping: 📌 Task added: milk\. Other changes may also have completed\./,
+  );
+});
+
+test("only real changes are listed after Stop", () => {
+  const changes = describeChanges([
+    { tool: "list_tasks", result: { tasks: [] } },
+    { tool: "create_task", result: { error: "Changes are blocked." } },
+    { tool: "complete_task", result: { success: false, status: "⚠️ Task not found or not completed" } },
+    { tool: "clear_notes", result: { confirmation_required: true, message: "confirm" } },
+    { tool: "clear_notes", result: { deleted_count: 0, status: "ℹ️ No notes to clear" } },
+    undefined,
+    { tool: "clear_tasks", result: { deleted_count: 2, status: "🗑️ Tasks cleared" } },
+  ]);
+
+  assert.deepEqual(changes, ["🗑️ Tasks cleared"]);
 });
