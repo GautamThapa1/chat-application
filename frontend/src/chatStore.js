@@ -782,7 +782,10 @@ export function createChatStore() {
       runningIds.add(item.conversation_id);
       const chat = chatState(item.conversation_id);
       chat.toolResults = Array.isArray(item.tool_results) ? item.tool_results : [];
+      const known = chat.generation?.requestId === item.request_id ? chat.generation : null;
       chat.generation = {
+        afterId: known ? known.afterId : lastMessageId(chat),
+        editMessageId: known?.editMessageId,
         requestId: item.request_id,
         mode: item.mode,
         prompt: item.prompt,
@@ -874,14 +877,13 @@ export function createChatStore() {
     if (finished) chat.generation = null;
 
     if (result?.ok) {
-      const before = new Set(chat.messages.map((m) => m.message_id));
       chat.messages = result.data.messages;
       chat.loaded = true;
       chat.loadError = "";
       chat.conversation = result.data.conversation;
       updateConversationInList(result.data.conversation);
       const saved = (m) => m.role === "user" && m.content === finished.prompt
-        && !before.has(m.message_id);
+        && m.message_id > finished.afterId;
       if (finished?.mode === "message" && !chat.messages.some(saved)) {
         returnPrompt(conversationId, finished.prompt);
         setNotice(chat, chat.notice === STOPPED
@@ -1190,9 +1192,15 @@ export function createChatStore() {
     }
   }
 
+  // The newest saved message: anything saved by a reply comes after it.
+  function lastMessageId(chat) {
+    return Math.max(0, ...chat.messages.map((m) => m.message_id ?? 0));
+  }
+
   function startGeneration(chat, fields) {
     chat.generation = {
-      assistantMessageId: null, prompt: "", text: "", finishing: false, ...fields,
+      assistantMessageId: null, prompt: "", text: "", finishing: false,
+      afterId: lastMessageId(chat), ...fields,
     };
     chat.toolResults = [];
     setNotice(chat, "");

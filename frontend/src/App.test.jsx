@@ -1266,3 +1266,19 @@ test("the app has one name", async () => {
   const page = await boot();
   assert.equal(page.$("#sidebar .brand span").textContent, "Luma Chat");
 });
+
+test("a reply saved just before it is announced is not treated as lost", async () => {
+  const page = await boot();
+  const request_id = await sendInChatA(page);
+  page.db.messages[1].push(
+    { message_id: 13, conversation_id: 1, role: "user", content: "hello" },
+    { message_id: 14, conversation_id: 1, role: "assistant", content: "Hi" },
+  );
+  await page.open("Chat B");
+  await page.open("Chat A"); // reloads while the reply is still marked running
+  page.socket.serverSend({ type: "complete", conversation_id: 1, request_id });
+  await tick(20);
+
+  assert.equal(page.$("#input").value, "");
+  assert.doesNotMatch(page.threadText(), /back in the box/);
+});
