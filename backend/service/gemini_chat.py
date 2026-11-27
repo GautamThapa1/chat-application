@@ -16,6 +16,7 @@ from google.genai import types
 
 from backend.embeddings import QUERY_TASK_TYPE, embed_text, embedding_model
 from backend.service import db, memory_store
+from backend.service.turn_control import TurnControl
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +347,18 @@ _TOOL_FIELDS = {
 }
 
 
+# Every tool that creates, changes, or deletes stored data.
+WRITE_TOOLS = frozenset({
+    "save_note", "save_memory", "update_note", "update_memory", "delete_memory",
+    "clear_notes", "create_task", "update_task", "complete_task", "delete_task",
+    "clear_tasks",
+})
+_WRITES_BLOCKED_MESSAGE = (
+    "Changes are blocked while regenerating an answer. "
+    "Tell the user to send a new message if they want this change."
+)
+
+
 @dataclass(frozen=True)
 class ToolExecutionResult:
     response: dict[str, Any]
@@ -537,6 +550,7 @@ def dispatch_tool_call(
     confirmation_token: str,
     gemini_client=None,
     idempotency_key: str | None = None,
+    control: TurnControl | None = None,
 ) -> ToolExecutionResult:
     """Validate and execute one declared tool against in-process storage."""
     if name not in _TOOL_FIELDS:
@@ -546,6 +560,9 @@ def dispatch_tool_call(
         args = _validate_arguments(name, arguments)
     except ValueError as exc:
         return ToolExecutionResult({"error": str(exc)})
+
+    if control is not None and not control.allow_writes and name in WRITE_TOOLS:
+        return ToolExecutionResult({"error": _WRITES_BLOCKED_MESSAGE})
 
     if name == "save_note":
         note = db.save_note_idempotent(

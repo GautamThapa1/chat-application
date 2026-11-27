@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from backend.service.gemini.agent.graph import AGENT_GRAPH
 from backend.service.gemini.client import build_initial_contents
 from backend.service.gemini.config import MAX_TOOL_ROUNDS
+from backend.service.turn_control import TurnControl
 
 TurnEvent = (
     tuple[str, str]
@@ -22,6 +23,8 @@ def run_turn(
     history: list[dict[str, str]],
     user_id: int,
     request_id: str,
+    *,
+    control: TurnControl | None = None,
 ) -> Iterator[TurnEvent]:
     """Run one turn and yield the same events ChatService already consumes."""
     # Prepares user's message and conversation history.
@@ -40,6 +43,7 @@ def run_turn(
         "gemini_client": gemini_client,
         "model": model,
         "request_id": request_id,
+        "control": control or TurnControl(),
     }
     graph_config = {
         "configurable": {

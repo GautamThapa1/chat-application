@@ -420,3 +420,23 @@ def test_stream_limit_fails_fast_with_resource_exhausted(grpc_runtime):
     first_call.cancel()
     release_read.set()
     assert stream_closed.wait(timeout=5)
+
+
+def test_real_grpc_regenerate_changes_no_data(grpc_runtime):
+    user_id, _, conversation_id, metadata, start_server = grpc_runtime
+    db.save_conversation(user_id, conversation_id, "add milk", "Added.", "seed")
+    assistant_id = db.get_conversation_messages(user_id, conversation_id)[-1]["id"]
+    client = _Client(
+        [_tool_call("create_task", {"title": "milk"})],
+        generated=[_text_response("Send a new message to add it.")],
+    )
+    stub = start_server(client)
+
+    events = list(stub.StreamMessage(
+        _request(conversation_id, request_id="regen", mode="regenerate",
+                 assistant_message_id=assistant_id),
+        metadata=metadata,
+    ))
+
+    assert events[-1].WhichOneof("payload") == "completed"
+    assert db.get_tasks(user_id) == []

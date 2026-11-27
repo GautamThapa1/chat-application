@@ -43,6 +43,7 @@ def make_dispatch_tool(tool_name: str) -> StructuredTool:
             "history",
             "confirmation_token",
             "gemini_client",
+            "control",
         }
         missing = required_context - app_context.keys()
         if missing:
@@ -60,6 +61,7 @@ def make_dispatch_tool(tool_name: str) -> StructuredTool:
             confirmation_token=app_context["confirmation_token"],
             gemini_client=app_context["gemini_client"],
             idempotency_key=runtime.tool_call_id,
+            control=app_context["control"],
         )
 
         # Stream the same ToolResult event the current gRPC service expects.

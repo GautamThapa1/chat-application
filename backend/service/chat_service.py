@@ -13,6 +13,7 @@ from backend.generated import chat_pb2, chat_pb2_grpc
 from backend.service import db, memory_store
 from backend.service.gemini import runner as gemini_chat
 from backend.service.auth_interceptor import AuthInterceptor, current_user_id
+from backend.service.turn_control import TurnControl
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,12 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
                 history,
                 user_id,
                 request.request_id,
+                control=TurnControl(
+                    allow_writes=mode != "regenerate",
+                    can_confirm=mode == "message",
+                    conversation_id=request.conversation_id,
+                    cancelled=cancelled,
+                ),
             )
             with closing(turn):
                 for kind, *payload in turn:

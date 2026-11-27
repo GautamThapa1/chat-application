@@ -5,6 +5,7 @@ import pytest
 from google.genai import types
 
 from backend.service import db, gemini_chat, memory_store
+from backend.service.turn_control import TurnControl
 
 
 def _response(*calls, text=None):
@@ -461,3 +462,25 @@ def test_listed_tool_without_a_handler_completes_nothing(monkeypatch):
             user_message="Snooze", history=[], confirmation_token="unused",
         )
     complete.assert_not_called()
+
+
+READ_TOOLS = {
+    "search_notes", "search_memories", "list_notes", "list_memories", "list_tasks",
+}
+
+
+def test_every_tool_that_changes_data_is_blocked_without_write_permission():
+    declared = {declaration.name for declaration in gemini_chat.FUNCTION_DECLARATIONS}
+    assert gemini_chat.WRITE_TOOLS == declared - READ_TOOLS
+    arguments = {
+        "title": "t", "content": "c", "keyword": "k", "due_at_local": "",
+        "note_id": 1, "memory_id": 1, "task_id": 1,
+    }
+    for name in sorted(gemini_chat.WRITE_TOOLS):
+        allowed = gemini_chat._TOOL_FIELDS[name][1]
+        result = gemini_chat.dispatch_tool_call(
+            name, {key: arguments[key] for key in allowed}, user_id=1,
+            user_message="Do it", history=[], confirmation_token="unused",
+            control=TurnControl(allow_writes=False),
+        )
+        assert result.response["error"].startswith("Changes are blocked")

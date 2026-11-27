@@ -224,7 +224,7 @@ def test_stream_message_serializes_tool_results_with_sequential_indexes(
 ):
     user_id, token, conversation_id, handler_for = chat_setup
 
-    def run_turn(message, client, model, history, actual_user_id, request_id):
+    def run_turn(message, client, model, history, actual_user_id, request_id, **kwargs):
         assert message == "Use tools"
         assert isinstance(client, _GeminiClient)
         assert model == "test-model"
