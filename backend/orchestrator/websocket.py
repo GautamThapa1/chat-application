@@ -30,6 +30,7 @@ from shared_common.common.log import trace_context
 
 log = logging.getLogger("orchestrator")
 _GENERIC_CHAT_ERROR = "Something went wrong. Please try again."
+_SAVE_PARTIAL_TIMEOUT_SECONDS = 5
 
 
 def _friendly_grpc_error(code: grpc.StatusCode) -> str:
@@ -172,6 +173,29 @@ class GenerationHub:
 hub = GenerationHub()
 
 
+async def _save_stopped_reply(gen: Generation, stub) -> None:
+    """Save what a stopped reply had produced, before the browser reloads.
+
+    The service saves it too, but only once its blocking model read returns,
+    which can be after the browser has already reloaded. The shared request_id
+    makes the second save a no-op. A stopped regeneration keeps the old answer.
+    """
+    if not gen.text or gen.mode == "regenerate":
+        return
+    try:
+        await stub.SaveConversation(
+            chat_pb2.SaveConversationRequest(
+                conversation_id=gen.conversation_id,
+                user_content=gen.prompt,
+                assistant_content=gen.text,
+                request_id=gen.request_id,
+            ),
+            timeout=_SAVE_PARTIAL_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        log.warning("Could not save the stopped reply", exc_info=True)
+
+
 async def _run_generation(
     gen: Generation,
     stub,
@@ -283,6 +307,7 @@ async def _run_generation_with_trace(
     except asyncio.CancelledError:
         cancelled = True
         terminal = ("cancelled", {})
+        await _save_stopped_reply(gen, stub)
 
     except Exception:
         log.exception("Failed to process chat message")

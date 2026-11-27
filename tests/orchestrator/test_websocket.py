@@ -95,6 +95,13 @@ class FakeStub:
             return call
 
         self.StreamMessage = Mock(side_effect=stream_message)
+        self.saved = []
+        self.save_error = None
+
+    async def SaveConversation(self, request, timeout=None):
+        if self.save_error is not None:
+            raise self.save_error
+        self.saved.append(request)
 
 
 def started():
@@ -337,6 +344,67 @@ async def test_explicit_cancel_cancels_the_grpc_stream():
 
     websocket.disconnect()
     await asyncio.wait_for(task, timeout=1)
+
+
+async def stop_reply(stub, websocket, *, wait_for_chunk=True, **fields):
+    """Send a message, stop it, and return what was saved when "cancelled" arrived."""
+    task = start_endpoint(websocket, stub)
+    websocket.push(json.loads(create_message("Hello", **fields)))
+    await websocket.next_event("chunk" if wait_for_chunk else "start")
+    websocket.push({"type": "cancel", "request_id": "request-1"})
+    await websocket.next_event("cancelled")
+    saved = list(stub.saved)
+    websocket.disconnect()
+    await asyncio.wait_for(task, timeout=1)
+    return saved
+
+
+def endless_stream(*first_events):
+    async def stream(request):
+        for event in first_events:
+            yield event
+        await asyncio.Event().wait()
+
+    return FakeStub(lambda request: stream(request))
+
+
+@pytest.mark.asyncio
+async def test_cancel_saves_the_partial_reply_before_announcing_it():
+    stub = endless_stream(started(), chunk("partial", 0))
+
+    saved = await stop_reply(stub, LiveWebSocket())
+
+    assert [
+        (r.conversation_id, r.user_content, r.assistant_content, r.request_id)
+        for r in saved
+    ] == [(3, "Hello", "partial", "request-1")]
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_any_text_saves_nothing():
+    stub = endless_stream(started())
+
+    assert await stop_reply(stub, LiveWebSocket(), wait_for_chunk=False) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_regeneration_keeps_the_old_answer():
+    stub = endless_stream(started(), chunk("partial", 0))
+
+    saved = await stop_reply(
+        stub, LiveWebSocket(), mode="regenerate", assistant_message_id=12
+    )
+
+    assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_is_announced_even_if_saving_fails():
+    stub = endless_stream(started(), chunk("partial", 0))
+    stub.save_error = RuntimeError("database is down")
+
+    assert await stop_reply(stub, LiveWebSocket()) == []
+    assert hub.get(1, 3) is None
 
 
 @pytest.mark.asyncio
